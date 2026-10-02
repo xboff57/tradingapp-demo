@@ -1,0 +1,83 @@
+# Buduje przenośną paczkę demo dla Windows (kod + Python z bibliotekami + plik .bat),
+# uruchamia ją na próbę i publikuje jako Release „v<VERSION>”.
+name: Paczka demo
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - name: Zbuduj paczkę
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PV = "3.12.10"
+          $O = "TradingApp-Demo"
+          New-Item -ItemType Directory $O | Out-Null
+          Invoke-WebRequest "https://www.python.org/ftp/python/$PV/python-$PV-embed-amd64.zip" -OutFile py.zip
+          Expand-Archive py.zip "$O\python"
+          # Lib\site-packages = biblioteki, ".." = folder paczki (tam jest app\)
+          Set-Content "$O\python\python312._pth" "python312.zip`r`n.`r`nLib\site-packages`r`n..`r`nimport site" -Encoding ascii
+          python -m pip install --disable-pip-version-check --no-compile --only-binary=:all: --target "$O\python\Lib\site-packages" -r requirements.txt
+          Get-ChildItem "$O\python\Lib\site-packages" -Recurse -Directory -Filter tests | Remove-Item -Recurse -Force
+          Copy-Item app "$O\app" -Recurse
+          Copy-Item demo\* $O
+          Copy-Item VERSION, THIRD_PARTY_NOTICES.md $O
+          "{0:N0} MB" -f ((Get-ChildItem $O -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: Próbne uruchomienie (tak jak u odbiorcy, przez plik .bat)
+        shell: pwsh
+        run: |
+          $O = "TradingApp-Demo"
+          Set-Content "$O\_test.cmd" "@call `"%~dp0Uruchom TradingApp Demo.bat`" < NUL > `"%~dp0..\demo_run.log`" 2>&1" -Encoding ascii
+          $p = Start-Process "$O\_test.cmd" -WorkingDirectory $O -PassThru -WindowStyle Hidden
+          $state = ""
+          for ($i = 0; $i -lt 300; $i++) {
+            Start-Sleep 2
+            try { $r = Invoke-RestMethod http://127.0.0.1:8765/api/demo; $state = $r.state; if ($state -ne "running" -and $state -ne "idle") { break } } catch {}
+          }
+          "stan danych demo: $state"
+          $ov = Invoke-RestMethod http://127.0.0.1:8765/api/overview
+          "boty: $($ov.bots.Count), kapitał: $($ov.accounts[0].equity)"
+          $page = (Invoke-WebRequest http://127.0.0.1:8765/ -UseBasicParsing).StatusCode
+          Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 3
+          Get-Content demo_run.log -Tail 30 -ErrorAction SilentlyContinue
+          if ($state -ne "done" -or $ov.bots.Count -lt 3 -or $page -ne 200) { throw "Próbne uruchomienie nie powiodło się" }
+          # czysta paczka: bez danych z próby
+          Remove-Item "$O\_test.cmd" -Force
+          Remove-Item "$O\dane" -Recurse -Force -ErrorAction SilentlyContinue
+          Get-ChildItem "$O\app" -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+
+      - name: Spakuj
+        shell: pwsh
+        run: Compress-Archive -Path TradingApp-Demo -DestinationPath TradingApp-Demo.zip -CompressionLevel Optimal
+
+      - name: Opublikuj Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = (Get-Content VERSION -Raw).Trim()
+          $notes = "Przenośna wersja demonstracyjna TradingApp $v dla Windows 10/11. Pobierz TradingApp-Demo.zip, rozpakuj i kliknij dwa razy 'Uruchom TradingApp Demo.bat'. Wszystko działa na koncie symulowanym, bez prawdziwych pieniędzy."
+          gh release view "v$v" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "v$v" TradingApp-Demo.zip --clobber
+          } else {
+            gh release create "v$v" TradingApp-Demo.zip --title "TradingApp Demo $v" --notes $notes --latest
+          }

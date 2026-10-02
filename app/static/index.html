@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingApp</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23101418'/%3E%3Cpath d='M6 22l6-7 5 4 9-11' fill='none' stroke='%2334d399' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<div id="login" class="login hidden">
+  <form id="login-form" class="login-card" autocomplete="on">
+    <div class="brand big"><span class="logo"></span>TradingApp</div>
+    <p class="muted small" id="login-hint">Zaloguj się do panelu botów.</p>
+    <div id="login-step1" class="login-fields">
+      <label class="field"><span>Login</span>
+        <input id="login-user" name="username" autocomplete="username" spellcheck="false" autocapitalize="off"></label>
+      <label class="field"><span>Hasło</span>
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required></label>
+    </div>
+    <div id="login-step2" class="login-fields hidden">
+      <label class="field"><span>Kod z aplikacji (6 cyfr)</span>
+        <input id="login-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="11"
+          placeholder="123 456" spellcheck="false"></label>
+      <div class="help">Zgubiony telefon? Wpisz jeden z kodów awaryjnych (np. 1a2b3-c4d5e).</div>
+    </div>
+    <button class="btn primary" type="submit" id="login-btn">Zaloguj</button>
+    <button class="btn ghost small hidden" type="button" id="login-back">← Wróć</button>
+    <p id="login-err" class="err"></p>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <aside class="side" id="side">
+    <div class="side-top">
+      <div class="brand"><span class="logo"></span>TradingApp</div>
+      <button class="btn ghost small menu-btn" id="menu-btn" aria-label="Menu" aria-expanded="false" aria-controls="nav">Menu</button>
+    </div>
+    <nav id="nav">
+      <div class="nav-group">Handel</div>
+      <a href="#/" data-route="dash">Pulpit</a>
+      <a href="#/bots" data-route="bots">Boty</a>
+      <a href="#/trades" data-route="trades">Transakcje</a>
+      <a href="#/reports" data-route="reports">Raporty</a>
+      <a href="#/chart" data-route="chart">Wykresy</a>
+      <div class="nav-group">Analiza</div>
+      <a href="#/backtests" data-route="backtests">Backtesty</a>
+      <a href="#/signals" data-route="signals">Sygnały</a>
+      <a href="#/radar" data-route="radar">Radar</a>
+      <a href="#/ml" data-route="ml">ML <span id="ml-badge" class="nav-badge hidden"></span></a>
+      <a href="#/lab" data-route="lab">Laboratorium <span id="lab-badge" class="nav-badge hidden"></span></a>
+      <div class="nav-group">Ustawienia</div>
+      <a href="#/accounts" data-route="accounts">Konta</a>
+      <a href="#/gateway" data-route="gateway">Bramka IBKR <span id="gw-badge" class="nav-badge bad hidden"></span></a>
+      <a href="#/security" data-route="security">Logowanie</a>
+      <a href="#/system" data-route="system">System</a>
+    </nav>
+    <div class="side-foot">
+      <span id="clock" class="clock"></span>
+      <button id="logout" class="btn ghost small">Wyloguj</button>
+    </div>
+  </aside>
+  <div class="main-col">
+    <div id="demo-bar" class="demo-bar hidden" role="status"></div>
+    <main id="view"></main>
+  </div>
+</div>
+
+<div id="modal" class="modal hidden"><div class="modal-card" id="modal-card"></div></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/chart.umd.min.js"></script>
+<script src="/static/qrcode.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+﻿TradingApp — wersja demonstracyjna
+===================================
+
+Jak uruchomić (Windows 10 / 11):
+1. Rozpakuj cały plik ZIP do zwykłego folderu (np. Dokumenty\TradingApp-Demo).
+   Nie uruchamiaj programu z wnętrza ZIP-a bez rozpakowania.
+2. Kliknij dwa razy „Uruchom TradingApp Demo.bat”.
+   Jeśli Windows pokaże okno „System Windows ochronił Twój komputer”, kliknij
+   „Więcej informacji” → „Uruchom mimo to” (program nie jest podpisany certyfikatem).
+3. Otworzy się czarne okno i po chwili przeglądarka z panelem (http://127.0.0.1:8765).
+   Za pierwszym razem aplikacja przygotowuje przykładowe dane przez 1–3 minuty.
+4. Aby wyłączyć aplikację, zamknij czarne okno.
+
+Co to jest:
+- Panel do automatycznych botów inwestycyjnych: boty, transakcje, raporty, wykresy
+  z formacjami i planem, backtesty (sprawdzanie strategii na historii), radar
+  najmocniejszych spółek i kryptowalut, uczenie maszynowe, laboratorium wariantów.
+- W tej wersji wszystko działa na koncie SYMULOWANYM ze 100 000 USD na start.
+  Ceny są generowane przez program — nazwy spółek (AAPL, PKO.WSE…) i kryptowalut
+  to tylko etykiety, a nie prawdziwe notowania. Nie ma tu żadnych prawdziwych pieniędzy.
+- Boty działają dalej, dopóki okno jest otwarte. Możesz je zmieniać, dodawać nowe
+  i uruchamiać własne backtesty.
+- Wyłączone w wersji demo: podłączanie prawdziwych kont i kluczy, bramka
+  Interactive Brokers, powiadomienia na telefon, logowanie i aktualizacje.
+
+Bezpieczeństwo:
+- Panel jest dostępny tylko na tym komputerze (adres 127.0.0.1) — nikt inny w sieci
+  go nie zobaczy. Program nie potrzebuje internetu i niczego nie wysyła.
+- Dane zapisują się w podfolderze „dane”. „System → Przywróć dane demo” przywraca
+  stan początkowy. Aby całkiem usunąć program, skasuj cały folder.
