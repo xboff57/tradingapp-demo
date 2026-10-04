@@ -20,6 +20,7 @@ if sys.stderr is None:
 import secrets
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -75,9 +76,15 @@ def _signal_notify(bot, symbol, side, qty, price, reason, pnl_pct):
     acc = config.ACCOUNTS.get(bot["account"])
     cur = _sym_currency(symbol, acc)
     pr = _pl(price, 2 if price >= 1 else 6)
-    if side == "BUY":
+    if side in ("BUY", "SHORT"):
         st = db.pos_states(bot["id"]).get(norm(symbol)) or {}
-        lines = [f"Bot „{bot['name']}” kupił {symbol} po ~{pr} {cur}."]
+        if side == "SHORT":
+            lines = [f"Bot „{bot['name']}” gra na SPADEK {symbol}: krótka sprzedaż po ~{pr} {cur}.",
+                     "Ręcznie: krótka sprzedaż (short / CFD) albo ETF odwrotny — tylko jeśli wiesz, jak to działa."]
+        else:
+            lines = [f"Bot „{bot['name']}” kupił {symbol} po ~{pr} {cur}."]
+            if st.get("meta"):
+                lines.append(f"To ETF z dźwignią — sygnał liczony na {st['meta']}.")
         if st.get("sl"):
             lines.append(f"Stop-loss: {_pl(st['sl'], 2 if st['sl'] >= 1 else 6)} {cur} ({_pp((st['sl'] / price - 1) * 100)})")
         lines.append("Sprzedaż: przyjdzie osobne powiadomienie, gdy bot wyjdzie z pozycji.")
@@ -92,10 +99,15 @@ def _signal_notify(bot, symbol, side, qty, price, reason, pnl_pct):
             n = amount / price if "/" in symbol or p.get("fractional_shares") else int(amount // price)
             lines.append(f"Dla Ciebie ({_pl(cap, 0)} {cur}): ~{_pl(amount, 0)} {cur} ({share * 100:.0f}% kapitału)"
                          + (f" = {n:g} szt." if n else " — za mało na 1 akcję"))
-        notify.send("\n".join(lines), "signals", title=f"Okazja: KUPNO {symbol}", tags=["chart_with_upwards_trend"],
-                    priority=4)
+        notify.send("\n".join(lines), "signals", title=f"Okazja: {'SPADEK' if side == 'SHORT' else 'KUPNO'} {symbol}",
+                    tags=["chart_with_downwards_trend" if side == "SHORT" else "chart_with_upwards_trend"], priority=4)
     else:
         res = f" Wynik bota: {_pp(pnl_pct)}." if pnl_pct is not None else ""
+        if side == "COVER":
+            notify.send(f"Bot „{bot['name']}” zakończył grę na spadek {symbol} po ~{pr} {cur} ({reason}).{res}\n"
+                        f"Jeśli grałeś na spadek za jego sygnałem — to moment na zamknięcie.", "signals",
+                        title=f"Okazja: KONIEC SPADKU {symbol}", tags=["chart_with_upwards_trend"], priority=4)
+            return
         notify.send(f"Bot „{bot['name']}” sprzedał {symbol} po ~{pr} {cur} ({reason}).{res}\n"
                     f"Jeśli kupiłeś za jego sygnałem — to moment na sprzedaż.", "signals",
                     title=f"Okazja: SPRZEDAŻ {symbol}", tags=["chart_with_downwards_trend"], priority=4)
@@ -109,12 +121,14 @@ def _trade_notify(bot_id, symbol, side, qty, price, reason, pnl, pnl_pct):
             _signal_notify(bot, symbol, side, qty, price, reason, pnl_pct)
         except Exception:
             log.exception("Powiadomienie o okazji")
-    if side == "SELL":
+    if side in ("SELL", "COVER"):
         icon = "🟢" if (pnl or 0) > 0 else "🔴"
-        notify.send(f"{icon} {name}: sprzedaż {symbol} po {price:,.4g} ({reason}) | wynik {pnl or 0:+,.2f}"
+        what = "koniec gry na spadek" if side == "COVER" else "sprzedaż"
+        notify.send(f"{icon} {name}: {what} {symbol} po {price:,.4g} ({reason}) | wynik {pnl or 0:+,.2f}"
                     + (f" ({pnl_pct:+.2f}%)" if pnl_pct is not None else ""), "sells")
     else:
-        notify.send(f"🛒 {name}: kupno {symbol} x{qty:g} po {price:,.4g}", "buys")
+        notify.send(f"{'📉' if side == 'SHORT' else '🛒'} {name}: {'krótka sprzedaż (gra na spadek)' if side == 'SHORT' else 'kupno'} "
+                    f"{symbol} x{qty:g} po {price:,.4g}", "buys")
 
 
 db.on_trade = _trade_notify
@@ -145,6 +159,9 @@ from . import signals as ext_signals
 ext_signals.set_db(db, lambda m: log.info(m))
 
 # ------------------------------------------------------------------ haslo panelu
+# Wersja z instalatora Windows: zamiast hasla z pliku pierwsze uruchomienie pokazuje kreator
+# „Ustaw login i hasło” (tylko z tego komputera, tylko dopóki nie ma własnego loginu).
+INSTALLED = os.environ.get("TRADINGAPP_INSTALLED", "").strip() == "1"
 PASSWORD = config.PANEL_PASSWORD
 if not PASSWORD:
     pw_file = os.path.join(config.DATA_DIR, "haslo_panelu.txt")
@@ -196,8 +213,16 @@ async def lifespan(app):
     if not demo.on():
         from . import gateway
         gateway.start(threading.Event())
+        from . import calendar_events, heartbeat
+        calendar_events.start(db, threading.Event())
+        heartbeat.start(db, threading.Event())
+        from . import webhook
+        try:
+            webhook.start(db)
+        except Exception as e:
+            log.warning(f"Odbiornik alertów TradingView nie wystartował: {e}")
         threading.Thread(target=startup_notice, daemon=True).start()
-    if os.name == "nt" and not demo.on():
+    if os.name == "nt" and not demo.on() and not INSTALLED:
         threading.Thread(target=windows_update_loop, daemon=True, name="windows-updater").start()
     log.info(f"Panel: http://{config.PANEL_HOST}:{config.PANEL_PORT}  (konta: {', '.join(config.ACCOUNTS)})")
     yield
@@ -218,7 +243,7 @@ async def auth(request: Request, call_next):
         if request.method != "GET" and DEMO_BLOCKED.match(path):
             return JSONResponse({"detail": "To jest wersja demonstracyjna — ta funkcja jest w niej wyłączona."},
                                 status_code=403)
-    elif path.startswith("/api/") and path not in ("/api/login", "/api/session"):
+    elif path.startswith("/api/") and path not in ("/api/login", "/api/session", "/api/setup"):
         exp = sessions.get(_sid(request.cookies.get("session")))
         bearer = request.headers.get("authorization", "")
         if (not exp or exp < time.time()) and not (bearer.startswith("Bearer ") and panel_auth.token_check(bearer[7:].strip())):
@@ -282,13 +307,44 @@ def logout(request: Request, response: Response):
     return {"ok": True}
 
 
+def _local(request):
+    return (request.client.host if request.client else "") in ("127.0.0.1", "::1", "localhost")
+
+
+def setup_needed(request=None):
+    return INSTALLED and not config.PANEL_PASSWORD and not panel_auth.user() and (request is None or _local(request))
+
+
 @app.get("/api/session")
 def session(request: Request):
     exp = sessions.get(_sid(request.cookies.get("session")))
     u = panel_auth.user()
     if config.DEMO:
         return {"logged_in": True, "custom_login": False, "demo": True}
-    return {"logged_in": bool(exp and exp > time.time()), "custom_login": bool(u)}
+    return {"logged_in": bool(exp and exp > time.time()), "custom_login": bool(u), "installed": INSTALLED,
+            "setup": setup_needed(request)}
+
+
+class SetupIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/setup")
+def first_setup(body: SetupIn, request: Request, response: Response):
+    """Pierwsze uruchomienie wersji z instalatora: własny login i hasło, od razu zalogowany."""
+    if not setup_needed(request):
+        raise HTTPException(403, "Login i hasło są już ustawione — zaloguj się.")
+    try:
+        panel_auth.set_login(body.username, body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    log.info(f"Ustawiono login panelu: {body.username.strip()}")
+    token = secrets.token_urlsafe(32)
+    sessions[_sid(token)] = time.time() + config.SESSION_HOURS * 3600
+    _save_sessions()
+    response.set_cookie("session", token, httponly=True, samesite="strict", max_age=config.SESSION_HOURS * 3600)
+    return {"ok": True}
 
 
 @app.get("/api/demo")
@@ -324,8 +380,10 @@ def bot_summary(bot, positions_by_account):
         "status": manager.status(bot["id"]), "last_error": bot["last_error"],
         "realized": realized, "unrealized": unreal, "total_pnl": realized + unreal,
         "closed_trades": n, "win_rate": wins / n * 100 if n else None,
-        "open_positions": len(pos), "exposure": sum(v["market_value"] for v in pos.values()),
+        "open_positions": len(pos), "exposure": sum(abs(v["market_value"]) for v in pos.values()),
         "last_log": last[0] if last else None,
+        "lev": {"mode": p.get("leverage_mode", "off"), "direction": p.get("direction", "long"),
+                "leverage": p.get("leverage", 1)} if p.get("leverage_mode", "off") != "off" else None,
     }
 
 
@@ -418,6 +476,20 @@ def check_bot(body: BotIn):
             errors.append("Filtr reżimu: symbol musi być w formacie IBKR (np. SPY, EUR.USD, WIG20 ETF .WSE) albo wyłącz filtr.")
         if (p.get("regime2_symbol") or "").strip() and venue_error([p["regime2_symbol"].strip().upper()]):
             errors.append("Drugi termometr: symbol musi być w formacie IBKR (np. SPY, ETFBW20TR.WSE) albo zostaw puste.")
+    mode = p.get("leverage_mode", "off")
+    if mode == "margin" and body.market == "crypto" and acc.type == "gielda" and not acc.paper:
+        errors.append("Margin na krypto obsługujemy tylko na Krakenie (albo na koncie na niby).")
+    if mode == "margin" and body.market == "crypto" and acc.type == "alpaca":
+        errors.append("Alpaca nie pozwala na margin ani krótką sprzedaż krypto — użyj Krakena.")
+    if mode == "etf" and acc.type in config.CRYPTO_EX_TYPES:
+        errors.append("ETF-y lewarowane są na kontach z akcjami (Alpaca, IBKR).")
+    if mode == "margin" and p.get("direction") != "long" and p.get("fractional_shares"):
+        errors.append("Krótka sprzedaż działa tylko na całych akcjach — wyłącz „Ułamki akcji”.")
+    if mode != "off":
+        from . import risk as risk_mod
+        ok, why = risk_mod.leverage_allowed(acc)
+        if not ok:
+            errors.append(why)
     uses_sec = body.market == "stocks" and (p.get("funds_mode", "off") != "off" or p.get("insider_mode", "off") != "off")
     if uses_sec and acc.type != "sim" and not os.environ.get("SEC_USER_AGENT", "").strip():
         errors.append("Ten bot czyta raporty z SEC - dopisz w .env SEC_USER_AGENT=Imię Nazwisko email@przyklad.pl "
@@ -439,6 +511,22 @@ def get_bot(bot_id: int):
     realized, n, wins = db.realized_pnl(bot_id)
     bot["stats"] = {"realized": realized, "closed_trades": n, "win_rate": wins / n * 100 if n else None}
     bot["ml"] = ml_bot_info(bot)
+    if bot["strategy"] in ("grid", "dca"):
+        from .special import dca_avg, dca_next_trigger
+        sp = []
+        for s in p.get("symbols", []):
+            st = db.get_state(bot_id, s)
+            if not st:
+                continue
+            if bot["strategy"] == "grid":
+                sp.append({"symbol": s, "levels": st["levels"], "held": sorted(int(k) for k in st["held"]),
+                           "slot_value": st["slot_value"], "stopped": st["stopped"], "realized": st["realized"]})
+            else:
+                sp.append({"symbol": s, "qty": st["qty"], "avg": dca_avg(st), "spent": st["cost"],
+                           "n_safety": st.get("n_safety", 0), "rounds": st.get("rounds", 0), "realized": st["realized"],
+                           "next_buy": dca_next_trigger(st, p) if st.get("last_buy") and p["dca_mode"] == "safety" else None,
+                           "next_t": st.get("next_t") or None})
+        bot["special"] = sp
     try:
         broker = get_broker(config.ACCOUNTS[bot["account"]])
         states = db.pos_states(bot_id)
@@ -455,6 +543,9 @@ def create_bot(body: BotIn):
     p = check_bot(body)
     if any(b["name"] == body.name for b in db.bots()):
         raise HTTPException(400, "Bot o tej nazwie juz istnieje")
+    if body.strategy == "tv_alerts":
+        from .webhook import new_token
+        p["tv_token"] = new_token()
     bot_id = db.create_bot(body.name.strip(), body.account, body.market, body.strategy, p)
     db.log(bot_id, "INFO", "Utworzono bota.")
     return {"id": bot_id, "warning": leverage_warning(p)}
@@ -466,6 +557,11 @@ def update_bot(bot_id: int, body: BotIn):
     if not bot:
         raise HTTPException(404, "Nie ma takiego bota")
     p = check_bot(body)
+    if body.strategy == "tv_alerts":                  # token webhooka nie jest polem formularza - zachowujemy go
+        from .webhook import new_token
+        p["tv_token"] = (bot["params"] or {}).get("tv_token") or new_token()
+    if body.strategy != bot["strategy"] or p["symbols"] != (bot["params"] or {}).get("symbols"):
+        db.del_state(bot_id)                           # siatka / DCA: nowa konfiguracja = nowy stan
     was_running = manager.status(bot_id) == "running"
     if was_running:
         manager.stop(bot_id, report=False)
@@ -726,6 +822,9 @@ def optimize_backtest(bt_id: int):
     if bt["opt_status"] == "running":
         return {"ok": True}
     cfg = bt["config"]
+    if cfg.get("strategy") in ("grid", "dca"):
+        raise HTTPException(400, "Propozycje poprawek działają dla strategii z sygnałami — siatkę i uśrednianie "
+                                 "porównaj, zmieniając ich ustawienia i uruchamiając test ponownie.")
     provider, tag = provider_for(cfg.get("data_source", "auto"))
     db.update_backtest(bt_id, opt_status="running", opt_progress=0, opt_error=None)
 
@@ -1115,6 +1214,40 @@ def notify_test():
     return {"ok": True}
 
 
+class HeartbeatIn(BaseModel):
+    url: str = ""
+
+
+@app.get("/api/notify/heartbeat")
+def heartbeat_get():
+    from . import heartbeat
+    return heartbeat.public()
+
+
+@app.put("/api/notify/heartbeat")
+def heartbeat_put(body: HeartbeatIn):
+    from . import heartbeat
+    try:
+        heartbeat.set_url(body.url)
+        if body.url.strip():
+            heartbeat.ping(db, test=True)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"Nie udało się wysłać pingu: {str(e)[:150]}")
+    return heartbeat.public()
+
+
+@app.post("/api/notify/heartbeat/test")
+def heartbeat_test():
+    from . import heartbeat
+    try:
+        heartbeat.ping(db)
+    except Exception as e:
+        raise HTTPException(400, str(e)[:200])
+    return heartbeat.public()
+
+
 class NotifyEvents(BaseModel):
     events: dict
 
@@ -1389,6 +1522,249 @@ def chart(symbol: str, tf: str = "1Day", source: str = "auto", template: str = "
             "patterns": pat}
 
 
+@app.get("/api/fundamentals")
+def fundamentals_get(symbol: str, price: float | None = None, refresh: bool = False):
+    symbol = symbol.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9./\-]{0,24}", symbol):
+        raise HTTPException(400, "Nieprawidłowy symbol.")
+    from . import fundamentals
+    return fundamentals.get(symbol, price, refresh)
+
+
+@app.get("/api/calendar")
+def calendar_symbol(symbol: str, refresh: bool = False):
+    symbol = symbol.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9./\-]{0,24}", symbol):
+        raise HTTPException(400, "Nieprawidłowy symbol.")
+    from . import calendar_events as cal
+    return {"symbol": symbol, "event": cal.get(symbol, refresh=refresh)}
+
+
+@app.get("/api/calendar/upcoming")
+def calendar_upcoming(days: int = 30):
+    from . import calendar_events as cal
+    syms = cal.watched(db)
+    held = cal.held(db)
+    bots_by_sym = {}
+    for b in db.bots():
+        if b["market"] == "stocks":
+            for s in (b["params"] or {}).get("symbols", []):
+                bots_by_sym.setdefault(s.upper(), []).append({"id": b["id"], "name": b["name"],
+                    "blackout": int((full_params(b["market"], b["strategy"], b["params"]) or {}).get("earnings_blackout_days") or 0)})
+    items = cal.upcoming(syms, max(1, min(days, 90)))
+    for it in items:
+        it["held_by"] = held.get(it["symbol"], [])
+        it["bots"] = bots_by_sym.get(it["symbol"], [])
+    return {"items": items, "status": cal.status(syms), "demo": config.DEMO}
+
+
+# ------------------------------------------------------------------ alerty TradingView (dane dla strony bota)
+@app.get("/api/bots/{bot_id}/tv")
+def bot_tv(bot_id: int):
+    bot = db.bot(bot_id)
+    if not bot or bot["strategy"] != "tv_alerts":
+        raise HTTPException(404, "To nie jest bot alertów TradingView.")
+    from .webhook import PORT
+    base = os.environ.get("TV_WEBHOOK_URL", "").strip().rstrip("/")
+    tok = (bot["params"] or {}).get("tv_token", "")
+    alerts = db.all("SELECT id, ts, symbol, action, price, status, note FROM tv_alerts WHERE bot_id=? "
+                    "ORDER BY id DESC LIMIT 30", (bot_id,))
+    return {"token": tok, "port": PORT, "url": f"{base}/tv/{tok}" if base else None, "base_set": bool(base),
+            "passphrase": bool((bot["params"] or {}).get("tv_passphrase")), "alerts": alerts,
+            "symbols": bot["params"].get("symbols", [])}
+
+
+@app.post("/api/bots/{bot_id}/tv/rotate")
+def bot_tv_rotate(bot_id: int):
+    bot = db.bot(bot_id)
+    if not bot or bot["strategy"] != "tv_alerts":
+        raise HTTPException(404, "To nie jest bot alertów TradingView.")
+    from .webhook import new_token
+    p = dict(bot["params"], tv_token=new_token())
+    db.update_bot(bot_id, params=p)
+    db.log(bot_id, "INFO", "Nowy adres webhooka TradingView (stary przestał działać).")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ strategia z opisu słownego (AI) i galeria
+class AiIn(BaseModel):
+    text: str
+    market: str | None = None
+    account: str | None = None
+
+
+_ai_hits = deque()
+
+
+@app.get("/api/ai/status")
+def ai_status():
+    from . import ai_builder
+    return {"enabled": ai_builder.enabled(), "model": ai_builder.MODEL}
+
+
+@app.post("/api/ai/strategy")
+def ai_strategy(body: AiIn):
+    from . import ai_builder
+    now = time.time()
+    while _ai_hits and now - _ai_hits[0] > 3600:
+        _ai_hits.popleft()
+    if len(_ai_hits) >= 30:
+        raise HTTPException(429, "Limit 30 tłumaczeń na godzinę — spróbuj później.")
+    acc = config.ACCOUNTS.get(body.account) if body.account else None
+    try:
+        _ai_hits.append(now)
+        return ai_builder.build(body.text, body.market if body.market in ("stocks", "crypto") else None,
+                                acc.type if acc else None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.warning(f"AI strategia: {e}")
+        raise HTTPException(502, "Nie udało się połączyć z API Claude — spróbuj ponownie.")
+
+
+GALLERY_PATH = os.path.join(os.path.dirname(__file__), "gallery.json")
+
+
+@app.get("/api/gallery")
+def gallery():
+    with open(GALLERY_PATH, encoding="utf-8") as f:
+        g = json.load(f)
+    for it in g["items"]:
+        it["strategy_name"] = STRATEGIES[it["strategy"]].name if it["strategy"] in STRATEGIES else it["strategy"]
+        it["params"] = full_params(it["market"], it["strategy"], it["params"])
+    return g
+
+
+# ------------------------------------------------------------------ ryzyko: bezpiecznik, dzwignia, ETF-y lewarowane
+class RiskIn(BaseModel):
+    halt: bool | None = None
+    halt_reason: str | None = None
+    daily_loss_pct: float | None = None
+    close_leveraged_on_limit: bool | None = None
+
+
+class RiskAccIn(BaseModel):
+    account: str
+    leverage_ok: bool | None = None
+    max_leverage: float | None = None
+    password: str = ""
+    code: str = ""
+
+
+def _lev_bots():
+    out = []
+    for b in db.bots():
+        p = full_params(b["market"], b["strategy"], b["params"])
+        if p.get("leverage_mode", "off") != "off":
+            out.append({"id": b["id"], "name": b["name"], "account": b["account"], "status": b["status"],
+                        "mode": p["leverage_mode"], "direction": p["direction"], "leverage": p["leverage"]})
+    return out
+
+
+@app.get("/api/risk")
+def risk_get():
+    from . import levetf, risk as risk_mod
+    eq = {}
+    for acc in config.ACCOUNTS.values():
+        r = db.one("SELECT equity, exposure, ts FROM equity WHERE scope='account' AND ref=? AND equity IS NOT NULL "
+                   "ORDER BY ts DESC LIMIT 1", (acc.name,))
+        if r:
+            eq[acc.name] = {"equity": r["equity"], "exposure": r["exposure"], "gross_lev":
+                            (abs(r["exposure"] or 0) / r["equity"]) if r["equity"] else None, "ts": r["ts"]}
+    st = risk_mod.status(list(config.ACCOUNTS.values()), eq)
+    st["bots"] = _lev_bots()
+    st["etf"] = levetf.table()
+    return st
+
+
+@app.put("/api/risk")
+def risk_put(body: RiskIn):
+    from . import risk as risk_mod
+    ch = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "daily_loss_pct" in ch and not 0 <= ch["daily_loss_pct"] <= 0.5:
+        raise HTTPException(400, "Dzienny limit straty: od 0 (wyłączony) do 50%.")
+    if "halt_reason" in ch:
+        ch["halt_reason"] = ch["halt_reason"][:200]
+    d = risk_mod.update(**ch)
+    if "halt" in ch:
+        notify.send("⏸ Wyłącznik: nowe wejścia wszystkich botów WSTRZYMANE." if ch["halt"]
+                    else "▶ Wyłącznik zdjęty: boty mogą znowu otwierać pozycje.", "system")
+    return d
+
+
+@app.put("/api/risk/account")
+def risk_account(body: RiskAccIn, request: Request):
+    from . import risk as risk_mod
+    acc = config.ACCOUNTS.get(body.account)
+    if not acc:
+        raise HTTPException(404, "Nie ma takiego konta.")
+    ch = {}
+    if body.leverage_ok is not None:
+        if body.leverage_ok and risk_mod.is_real(acc):     # zgoda na dzwignie na prawdziwych pieniadzach: haslo + 2FA
+            _confirm_password(request, body.password)
+            _confirm_code(request, body.code)
+        ch["leverage_ok"] = body.leverage_ok
+    if body.max_leverage is not None:
+        if not (body.max_leverage == 0 or 1 <= body.max_leverage <= 5):
+            raise HTTPException(400, "Limit dźwigni: 1–5 (0 = domyślny limit rynku).")
+        ch["max_leverage"] = body.max_leverage
+    a = risk_mod.set_account(acc.name, **ch)
+    if body.leverage_ok and risk_mod.is_real(acc):
+        notify.send(f"⚠️ Włączono zgodę na dźwignię i grę na spadki na koncie z prawdziwymi pieniędzmi: {acc.name}.",
+                    "system", priority=5)
+    return a
+
+
+@app.post("/api/risk/verify-etfs")
+def risk_verify_etfs():
+    from . import levetf
+    alp = None
+    da = config.data_account()
+    if da:
+        try:
+            from alpaca.trading.client import TradingClient
+            alp = TradingClient(da.key, da.secret, paper=da.paper)
+        except Exception as e:
+            raise HTTPException(400, f"Alpaca niedostępna: {e}")
+    ib = next((a for a in config.ACCOUNTS.values() if a.type == "ibkr"), None)
+    ibb = None
+    if ib:
+        try:
+            ibb = get_broker(ib)
+        except Exception:
+            ibb = None
+    if not alp and not ibb:
+        raise HTTPException(400, "Do sprawdzenia ETF-ów potrzebne jest konto Alpaca albo IBKR.")
+    levetf.verify(alp, ibb)
+    return levetf.table()
+
+
+class CloseLevIn(BaseModel):
+    password: str = ""
+    code: str = ""
+
+
+@app.post("/api/risk/close-leveraged")
+def risk_close_leveraged(body: CloseLevIn, request: Request):
+    """Zamyka wszystkie pozycje botów z dźwignią / grą na spadki (po rynku) i wstrzymuje nowe wejścia."""
+    _confirm_password(request, body.password)
+    _confirm_code(request, body.code)
+    from . import risk as risk_mod
+    risk_mod.update(halt=True, halt_reason="zamknięto pozycje z dźwignią")
+    closed, errors = 0, []
+    for bid, runner in list(manager.runners.items()):
+        if getattr(runner, "lev_mode", "off") == "off":
+            continue
+        try:
+            for s, pos in runner.mine(runner.broker.positions()).items():
+                runner.close(runner.by_norm.get(s, pos["symbol"]), "zamknięcie z zakładki Ryzyko", pos)
+                closed += 1
+        except Exception as e:
+            errors.append(f"{runner.bot['name']}: {e}")
+    notify.send(f"🛑 Zamknięto {closed} pozycji z dźwignią; nowe wejścia wstrzymane (wyłącznik).", "system", priority=5)
+    return {"closed": closed, "errors": errors}
+
+
 # ------------------------------------------------------------------ bramka IB Gateway
 class GatewayIn(BaseModel):
     action: str = ""
@@ -1396,6 +1772,7 @@ class GatewayIn(BaseModel):
     code: str = ""
     auto_restart: bool | None = None
     threshold_min: int | None = None
+    weekend_pause: bool | None = None
 
 
 @app.get("/api/gateway")
@@ -1423,7 +1800,8 @@ def gateway_settings(body: GatewayIn):
     cur = gateway.settings()
     try:
         gateway.save_settings(cur["auto_restart"] if body.auto_restart is None else body.auto_restart,
-                              cur["threshold_min"] if body.threshold_min is None else body.threshold_min)
+                              cur["threshold_min"] if body.threshold_min is None else body.threshold_min,
+                              cur.get("weekend_pause", True) if body.weekend_pause is None else body.weekend_pause)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return gateway.settings()
@@ -1506,12 +1884,15 @@ def system_info():
                "key": release.public_key_info()}
     return {"version": app_version(), "status": status, "log": log_tail, "pending": pending, "signing": signing,
             "backups": backups[:5], "force": os.path.exists(os.path.join(UPDATES, "force")),
-            "updater_detected": status is not None, "platform": "windows" if os.name == "nt" else "docker"}
+            "updater_detected": status is not None, "platform": "windows" if os.name == "nt" else "docker",
+            "installed": INSTALLED}
 
 
 @app.post("/api/system/upload")
 async def upload_update(request: Request, force: bool = False, filename: str = "tradingapp.zip"):
     """Przyjmuje paczke .zip z nowa wersja. Wdraza ja kontener 'updater' (NAS) albo aktualizuj.ps1 (Windows)."""
+    if INSTALLED:
+        raise HTTPException(400, "Tę wersję aktualizujesz nowszym instalatorem z GitHuba — dane i ustawienia zostają.")
     import io
     import zipfile
     body = await request.body()

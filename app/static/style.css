@@ -494,3 +494,35 @@ a.sym { text-decoration: none; } a.sym:hover b { color: var(--accent); }
 .demo-note { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); color: var(--muted); font-size: 13px; padding: 10px 14px; }
 body.demo #nav a[data-route="gateway"], body.demo #nav a[data-route="security"], body.demo #logout { display: none; }
 @media (max-width: 860px) { .demo-bar { padding: 10px 16px; } }
+
+/* ---- wykresy: dane finansowe ---- */
+.fund-card .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.fund-metrics { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.fund-metrics .metric { cursor: help; }
+.fund-h { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; font-weight: 600; }
+.fund-q { position: relative; height: 220px; }
+.fund-table td:first-child { white-space: nowrap; color: var(--text-2, var(--muted)); }
+.fund-table th, .fund-table td { padding: 6px 10px; }
+
+/* ---- kalendarz i straznik ---- */
+.ev-line { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 0 0 12px; }
+.ev-tag { font-size: 13px; padding: 5px 10px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel-2); }
+.ev-tag.warn { border-color: var(--warn); }
+.ev-tag.muted { color: var(--muted); }
+.hb-box { border-top: 1px solid var(--line); padding: 14px 0 6px; margin: 4px 0 12px; }
+.hb-box h3 { margin: 0 0 6px; }
+td.nowrap, .nowrap { white-space: nowrap; }
+
+/* ---- ryzyko i dzwignia ---- */
+.halt-on { border-color: var(--down); box-shadow: inset 0 0 0 1px var(--down); }
+.etf-chip { display: inline-flex; gap: 4px; align-items: baseline; font-family: var(--mono, "Plex Mono", monospace); font-size: 12px;
+  padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line-2); color: var(--muted); margin: 2px 2px 2px 0; }
+.etf-chip small { font-size: 10px; opacity: .8; }
+.etf-chip.ok { color: var(--up); border-color: rgba(47, 208, 143, .4); }
+.etf-chip.bad { color: var(--down); border-color: rgba(255, 90, 110, .35); text-decoration: line-through; }
+.etf-chip.use { box-shadow: 0 0 0 1.5px var(--accent); }
+.lev-fs .note a { color: var(--accent); }
+
+/* galeria strategii */
+.grid.metrics.gal-metrics { grid-template-columns: repeat(4, 1fr); gap: 8px; }
+@media (max-width: 640px) { .grid.metrics.gal-metrics { grid-template-columns: repeat(2, 1fr); } }

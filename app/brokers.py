@@ -34,6 +34,10 @@ class Broker:
     def buy_notional(self, symbol, notional): ...
     def sell_stop_limit(self, symbol, qty, stop, limit): ...
     def close_position(self, symbol): ...
+    # dzwignia / gra na spadki (opcjonalne):
+    # short_bracket(symbol, qty, stop, take, overnight)  - krotka sprzedaz akcji ze stopem nad cena i TP pod cena
+    # margin_open(symbol, side, notional, leverage) -> (cena, ilosc)  - krypto na marginesie (long/short)
+    # margin_stop(symbol, side, qty, stop) -> "server" | "soft"
 
 
 # ------------------------------------------------------------------ Alpaca
@@ -50,7 +54,9 @@ class AlpacaBroker(Broker):
         a = self.client.get_account()
         return {"equity": float(a.equity), "cash": float(a.cash), "buying_power": float(a.buying_power),
                 "crypto_buying_power": float(a.non_marginable_buying_power or a.cash),
-                "last_equity": float(a.last_equity or a.equity)}
+                "margin_buying_power": float(getattr(a, "regt_buying_power", None) or a.buying_power),
+                "last_equity": float(a.last_equity or a.equity),
+                "shorting_enabled": bool(getattr(a, "shorting_enabled", False))}
 
     def positions(self):
         out = {}
@@ -82,6 +88,24 @@ class AlpacaBroker(Broker):
         from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
         self.client.submit_order(MarketOrderRequest(
             symbol=symbol, qty=qty, side=OrderSide.BUY,
+            time_in_force=TimeInForce.GTC if overnight else TimeInForce.DAY,
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=round(take, 2)),
+            stop_loss=StopLossRequest(stop_price=round(stop, 2))))
+
+    def short_bracket(self, symbol, qty, stop, take, overnight):
+        """Krotka sprzedaz (gra na spadek): sprzedaz pozyczonych akcji + stop-loss NAD cena i take-profit POD cena.
+        Alpaca: tylko cale akcje, spolka musi byc 'shortable' i 'easy to borrow', konto z marginesem."""
+        from alpaca.trading.requests import MarketOrderRequest, TakeProfitRequest, StopLossRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+        try:
+            asset = self.client.get_asset(symbol)
+        except Exception as e:
+            raise BrokerError(f"{symbol}: nie znam tej spółki w Alpace ({e})")
+        if not getattr(asset, "shortable", False) or not getattr(asset, "easy_to_borrow", False):
+            raise BrokerError(f"{symbol}: Alpaca nie pozwala teraz grać na spadek tej spółki (brak akcji do pożyczenia)")
+        self.client.submit_order(MarketOrderRequest(
+            symbol=symbol, qty=int(qty), side=OrderSide.SELL,
             time_in_force=TimeInForce.GTC if overnight else TimeInForce.DAY,
             order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=round(take, 2)),
@@ -132,6 +156,31 @@ class AlpacaBroker(Broker):
                 raise BrokerError(f"zlecenie {st}")
             time.sleep(1)
         raise BrokerError("zlecenie nie zrealizowalo sie w 30 s")
+
+    def _market_qty(self, symbol, qty, side):
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+        qty = int(qty * 1e9) / 1e9
+        tif = TimeInForce.GTC if is_crypto(symbol) else TimeInForce.DAY
+        o = self.client.submit_order(MarketOrderRequest(symbol=symbol, qty=qty,
+                                                        side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
+                                                        time_in_force=tif))
+        for _ in range(30):
+            o = self.client.get_order_by_id(o.id)
+            st = str(getattr(o.status, "value", o.status)).lower()
+            if st == "filled":
+                return float(o.filled_avg_price), float(o.filled_qty)
+            if st in ("canceled", "rejected", "expired"):
+                raise BrokerError(f"zlecenie {st}")
+            time.sleep(1)
+        raise BrokerError("zlecenie nie zrealizowalo sie w 30 s")
+
+    def buy_qty(self, symbol, qty):
+        """Kupno po rynku bez zlecen ochronnych (siatka, DCA - pilnuje bot). Zwraca (cena, ilosc)."""
+        return self._market_qty(symbol, qty, "buy")
+
+    def sell_qty(self, symbol, qty):
+        return self._market_qty(symbol, qty, "sell")
 
     def sell_stop_limit(self, symbol, qty, stop, limit):
         from alpaca.trading.requests import StopLimitOrderRequest
@@ -191,9 +240,27 @@ class SimBroker(Broker):
         mins = now.hour * 60 + now.minute
         return now.weekday() < 5 and 13 * 60 + 30 <= mins < 20 * 60
 
-    def _process(self):
-        """Realizacja zlecen oczekujacych po biezacej cenie."""
+    MAX_LEV = {"stocks": 2.0, "crypto": 5.0}            # limit brutto: wartosc pozycji / kapital
+
+    def _gross(self, extra=0.0, sym=None):
         with self.lock:
+            tot = abs(extra)
+            for p in self.state["positions"].values():
+                tot += abs(p["qty"]) * self._price(p["symbol"])
+            return tot
+
+    def _equity_now(self):
+        return self.state["cash"] + sum(p["qty"] * self._price(p["symbol"]) for p in self.state["positions"].values())
+
+    def _check_gross(self, symbol, value):
+        lim = self.MAX_LEV["crypto" if is_crypto(symbol) else "stocks"]
+        if self._gross(value) > self._equity_now() * lim + 1e-6:
+            raise BrokerError(f"za mało środków (limit dźwigni konta {lim:g}×)")
+
+    def _process(self):
+        """Realizacja zlecen oczekujacych po biezacej cenie (dlugie: stop/TP ponizej/powyzej; krotkie - lustrzanie)."""
+        with self.lock:
+            self._accrue()
             remaining = []
             for o in self.state["orders"]:
                 sym = o["symbol"]
@@ -203,13 +270,19 @@ class SimBroker(Broker):
                 price = self._price(sym)
                 pos = self.state["positions"].get(norm(sym))
                 hit = False
-                if pos and o["type"] == "stop" and price <= o["stop"]:
+                short = bool(pos and pos["qty"] < 0)
+                if pos and o["type"] == "stop" and (price >= o["stop"] if short else price <= o["stop"]):
                     fill, hit = price, True
-                elif pos and o["type"] == "stop_limit" and o["limit"] <= price <= o["stop"]:
+                elif pos and o["type"] == "stop_limit" and not short and o["limit"] <= price <= o["stop"]:
                     fill, hit = price, True        # jak na gieldzie: przy luce ponizej limitu nie wykona sie
-                elif pos and o["type"] == "limit" and price >= o["limit"]:
+                elif pos and o["type"] == "limit" and (price <= o["limit"] if short else price >= o["limit"]):
                     fill, hit = price, True
-                if hit:
+                if hit and short:
+                    self._buy(sym, min(o["qty"], -pos["qty"]), fill)
+                    if o.get("oco"):
+                        self.state["orders"] = [x for x in self.state["orders"] if x.get("oco") != o["oco"]]
+                        remaining = [x for x in remaining if x.get("oco") != o["oco"]]
+                elif hit:
                     qty = min(o["qty"], pos["qty"])
                     self._sell(sym, qty, fill)
                     if o.get("oco"):   # druga noga bracketu znika
@@ -220,23 +293,65 @@ class SimBroker(Broker):
             self.state["orders"] = [o for o in remaining if norm(o["symbol"]) in self.state["positions"]]
             self._save()
 
-    def _buy(self, symbol, qty, price):
-        cost = qty * price * (1.0015 if is_crypto(symbol) else 1)
-        if cost > self.state["cash"] + 1e-6:
-            raise BrokerError("insufficient buying power")
-        self.state["cash"] -= cost
+    FEE_RATE = None                                      # None = 0,15% krypto, 0 akcje
+
+    def _fee(self, symbol):
+        return self.FEE_RATE if self.FEE_RATE is not None else (0.0015 if is_crypto(symbol) else 0.0)
+
+    MARGIN_RATE = 0.07                                   # odsetki od pozyczonej gotowki (ok. jak Alpaca), rocznie
+
+    def _accrue(self):
+        """Odsetki od pożyczonej gotówki (ujemne saldo) - naliczane za każdą pełną dobę."""
+        now = time.time()
+        last = self.state.get("int_t") or now
+        days = int((now - last) // 86400)
+        if days > 0:
+            if self.state["cash"] < 0:
+                self.state["cash"] += self.state["cash"] * self.MARGIN_RATE / 365 * days
+            self.state["int_t"] = last + days * 86400
+        elif "int_t" not in self.state:
+            self.state["int_t"] = now
+
+    def _buy(self, symbol, qty, price, margin=False):
         s = norm(symbol)
         p = self.state["positions"].get(s)
+        fee = qty * price * self._fee(symbol)
+        if p and p["qty"] < 0:                           # odkupienie pozyczonych (zamkniecie krotkiej pozycji)
+            self.state["cash"] -= qty * price + fee
+            p["qty"] += qty
+            if abs(p["qty"]) <= 1e-9:
+                del self.state["positions"][s]
+            return
+        cost = qty * price + fee
+        if cost > self.state["cash"] + 1e-6:
+            if not margin:
+                raise BrokerError("insufficient buying power")
+            self._check_gross(symbol, qty * price)
+        self.state["cash"] -= cost
         if p:
             p["avg_entry"] = (p["avg_entry"] * p["qty"] + price * qty) / (p["qty"] + qty)
             p["qty"] += qty
         else:
             self.state["positions"][s] = {"symbol": symbol, "qty": qty, "avg_entry": price}
+        if margin:
+            self.state["positions"][s]["margin"] = True
 
-    def _sell(self, symbol, qty, price):
+    def _sell(self, symbol, qty, price, margin=False):
         s = norm(symbol)
-        p = self.state["positions"][s]
-        self.state["cash"] += qty * price
+        p = self.state["positions"].get(s)
+        fee = qty * price * self._fee(symbol)
+        if not p or p["qty"] < 0:                        # krotka sprzedaz (pozyczone akcje / monety)
+            if not margin:
+                raise BrokerError("brak pozycji do sprzedania")
+            self._check_gross(symbol, qty * price)
+            self.state["cash"] += qty * price - fee
+            if p:
+                p["avg_entry"] = (p["avg_entry"] * -p["qty"] + price * qty) / (-p["qty"] + qty)
+                p["qty"] -= qty
+            else:
+                self.state["positions"][s] = {"symbol": symbol, "qty": -qty, "avg_entry": price, "margin": True}
+            return
+        self.state["cash"] += qty * price - fee
         p["qty"] -= qty
         if p["qty"] <= 1e-9:
             del self.state["positions"][s]
@@ -246,9 +361,15 @@ class SimBroker(Broker):
         self._process()
         pos = self.positions()
         mv = sum(p["market_value"] for p in pos.values())
+        gross = sum(abs(p["market_value"]) for p in pos.values())
         eq = self.state["cash"] + mv
-        return {"equity": eq, "cash": self.state["cash"], "buying_power": self.state["cash"],
-                "crypto_buying_power": self.state["cash"], "last_equity": eq}
+        day = datetime.now(timezone.utc).date().isoformat()
+        if self.state.get("day") != day:                 # kapital na poczatku dnia (do dziennego limitu straty)
+            self.state["day"], self.state["day_equity"] = day, eq
+        lev = self.MAX_LEV["crypto"] if getattr(self, "quote", None) else self.MAX_LEV["stocks"]
+        return {"equity": eq, "cash": self.state["cash"], "buying_power": max(0.0, self.state["cash"]),
+                "crypto_buying_power": max(0.0, self.state["cash"]),
+                "margin_buying_power": max(0.0, eq * lev - gross), "last_equity": self.state.get("day_equity", eq)}
 
     def positions(self):
         out = {}
@@ -257,9 +378,10 @@ class SimBroker(Broker):
                 price = self._price(p["symbol"])
                 reserved = sum(o["qty"] for o in self.state["orders"]
                                if norm(o["symbol"]) == s and o["type"] in ("stop", "stop_limit"))
-                out[s] = {"symbol": p["symbol"], "qty": p["qty"], "qty_available": max(0.0, p["qty"] - reserved),
+                out[s] = {"symbol": p["symbol"], "qty": p["qty"],
+                          "qty_available": max(0.0, p["qty"] - reserved) if p["qty"] > 0 else p["qty"],
                           "avg_entry": p["avg_entry"], "price": price, "market_value": p["qty"] * price,
-                          "unrealized": (price - p["avg_entry"]) * p["qty"]}
+                          "unrealized": (price - p["avg_entry"]) * p["qty"], "margin": bool(p.get("margin"))}
         return out
 
     def clock(self):
@@ -275,7 +397,7 @@ class SimBroker(Broker):
 
     def open_orders(self, symbol=None):
         self._process()
-        return [{"id": o["id"], "symbol": o["symbol"], "side": "sell", "type": o["type"]}
+        return [{"id": o["id"], "symbol": o["symbol"], "side": o.get("side", "sell"), "type": o["type"]}
                 for o in self.state["orders"] if symbol is None or norm(o["symbol"]) == norm(symbol)]
 
     def cancel(self, order_id):
@@ -293,6 +415,63 @@ class SimBroker(Broker):
                 {"id": str(uuid.uuid4()), "symbol": symbol, "type": "stop", "qty": qty, "stop": stop, "oco": oco},
                 {"id": str(uuid.uuid4()), "symbol": symbol, "type": "limit", "qty": qty, "limit": take, "oco": oco}]
             self._save()
+
+    def short_bracket(self, symbol, qty, stop, take, overnight):
+        if not self._market_open():
+            raise BrokerError("rynek zamkniety")
+        with self.lock:
+            self._sell(symbol, qty, self._price(symbol), margin=True)
+            oco = str(uuid.uuid4())
+            self.state["orders"] += [
+                {"id": str(uuid.uuid4()), "symbol": symbol, "type": "stop", "side": "buy", "qty": qty, "stop": stop,
+                 "oco": oco},
+                {"id": str(uuid.uuid4()), "symbol": symbol, "type": "limit", "side": "buy", "qty": qty, "limit": take,
+                 "oco": oco}]
+            self._save()
+
+    def buy_qty(self, symbol, qty):
+        if not is_crypto(symbol) and not self._market_open():
+            raise BrokerError("rynek zamkniety")
+        with self.lock:
+            price = self._price(symbol)
+            self._buy(symbol, qty, price)
+            self._save()
+            return price, qty
+
+    def sell_qty(self, symbol, qty):
+        if not is_crypto(symbol) and not self._market_open():
+            raise BrokerError("rynek zamkniety")
+        with self.lock:
+            p = self.state["positions"].get(norm(symbol))
+            if not p or p["qty"] <= 0:
+                raise BrokerError("brak pozycji do sprzedania")
+            qty = min(qty, p["qty"])
+            price = self._price(symbol)
+            self._sell(symbol, qty, price)
+            self._save()
+            return price, qty
+
+    def margin_open(self, symbol, side, notional, leverage):
+        """Pozycja na marginesie za kwote (wartosc pozycji). Zwraca (cena, ilosc)."""
+        if not is_crypto(symbol) and not self._market_open():
+            raise BrokerError("rynek zamkniety")
+        with self.lock:
+            price = self._price(symbol)
+            qty = notional / price
+            if side == "buy":
+                self._buy(symbol, qty, price, margin=True)
+            else:
+                self._sell(symbol, qty, price, margin=True)
+            self._save()
+            return price, qty
+
+    def margin_stop(self, symbol, side, qty, stop):
+        """Stop na serwerze (tu: w symulatorze). side = strona zlecenia zamykajacego ('sell' dla long, 'buy' dla short)."""
+        with self.lock:
+            self.state["orders"].append({"id": str(uuid.uuid4()), "symbol": symbol, "type": "stop", "side": side,
+                                         "qty": abs(qty), "stop": stop})
+            self._save()
+        return "server"
 
     supports_fractional = True
 
@@ -323,7 +502,10 @@ class SimBroker(Broker):
                 return None
             price = self._price(p["symbol"])
             qty = p["qty"]
-            self._sell(p["symbol"], qty, price)
+            if qty < 0:
+                self._buy(p["symbol"], -qty, price)
+            else:
+                self._sell(p["symbol"], qty, price)
             self.state["orders"] = [o for o in self.state["orders"] if norm(o["symbol"]) != s]
             self._save()
             return {"qty": qty, "price": price}

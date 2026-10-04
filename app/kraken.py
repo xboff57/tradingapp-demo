@@ -345,11 +345,83 @@ class KrakenBroker:
             free = float((bal.get("free") or {}).get(base) or 0)
             out[norm(sym)] = {"symbol": sym, "qty": qty, "qty_available": free, "avg_entry": entry, "price": price,
                               "market_value": qty * price, "unrealized": (price - entry) * qty}
+        if self.id == "kraken" and getattr(self, "use_margin", False):
+            out.update(self.margin_positions())         # pozycja na marginesie ma pierwszenstwo przed saldem spot
         return out
 
     def clock(self):
         now = datetime.now(timezone.utc)
         return {"is_open": True, "now": now, "next_open": now, "next_close": now + timedelta(days=365)}
+
+    # --- margines (tylko Kraken): pozycje long/short z dzwignia, rozliczane w walucie konta
+    def margin_positions(self):
+        if self.id != "kraken":
+            return {}
+        try:
+            with self.lock:
+                rows = self.ex.fetch_positions()
+        except Exception as e:
+            raise self._err(f"nie udało się pobrać pozycji na marginesie ({e})")
+        agg = {}
+        for r in rows:
+            sym = r.get("symbol")
+            if not sym or not sym.endswith("/" + self.quote):
+                continue
+            info = r.get("info") or {}
+            vol = float(info.get("vol") or r.get("contracts") or 0) - float(info.get("vol_closed") or 0)
+            if vol <= 0:
+                continue
+            sign = -1 if r.get("side") == "short" else 1
+            a = agg.setdefault(sym, {"qty": 0.0, "cost": 0.0, "net": 0.0, "lev": r.get("leverage")})
+            a["qty"] += sign * vol
+            a["cost"] += float(info.get("cost") or 0)
+            a["net"] += float(info.get("net") or r.get("unrealizedPnl") or 0)
+        out = {}
+        prices = self._px(list(agg)) if agg else {}
+        for sym, a in agg.items():
+            price = prices.get(sym) or 0
+            entry = a["cost"] / abs(a["qty"]) if a["qty"] else price
+            out[norm(sym)] = {"symbol": sym, "qty": a["qty"], "qty_available": a["qty"], "avg_entry": entry,
+                              "price": price, "market_value": a["qty"] * price,
+                              "unrealized": (price - entry) * a["qty"], "margin": True, "leverage": a["lev"]}
+        return out
+
+    def margin_open(self, symbol, side, notional, leverage):
+        """Pozycja na marginesie Krakena. notional = wartość pozycji; zabezpieczenie = notional / dźwignia."""
+        if self.id != "kraken":
+            raise self._err("margin obsługujemy tylko na Krakenie")
+        m = self._mk().get(symbol)
+        if not m:
+            raise self._err(f"brak pary {symbol}")
+        allowed = [int(x) for x in ((m.get("info") or {}).get("leverage_buy" if side == "buy" else "leverage_sell") or [])]
+        if not allowed:
+            raise self._err(f"{symbol}: Kraken nie pozwala na margin dla tej pary")
+        lev = max(2, int(round(leverage)))
+        lev = min([x for x in allowed if x >= lev] or [max(allowed)])
+        price = self._px([symbol])[symbol]
+        amount = float(self.ex.amount_to_precision(symbol, notional / price))
+        with self.lock:
+            o = self.ex.create_order(symbol, "market", side, amount, None, {"leverage": lev})
+        o = self._wait(o, symbol)
+        return float(o.get("average") or o.get("price") or price), float(o.get("filled") or amount)
+
+    def margin_stop(self, symbol, side, qty, stop):
+        """Stop-loss na serwerze dla pozycji na marginesie (zlecenie zamykające z tą samą dźwignią)."""
+        if symbol in self.soft_stops:
+            return "soft"
+        try:
+            pos = self.margin_positions().get(norm(symbol)) or {}
+            lev = int(pos.get("leverage") or 2)
+            with self.lock:
+                amount = float(self.ex.amount_to_precision(symbol, abs(qty)))
+                self.ex.create_order(symbol, "market", side, amount, None,
+                                     {"stopLossPrice": float(self.ex.price_to_precision(symbol, stop)),
+                                      "leverage": lev, "reduce_only": True})
+            return "server"
+        except Exception as e:
+            self.soft_stops.add(symbol)
+            self.soft_reason = str(e)[:200]
+            return "soft"
 
     def open_orders(self, symbol=None):
         with self.lock:
@@ -395,6 +467,27 @@ class KrakenBroker:
         self._save()
         return fill, qty
 
+    def buy_qty(self, symbol, qty):
+        price = self._px([symbol])[symbol]
+        return self.buy_notional(symbol, qty * price)
+
+    def sell_qty(self, symbol, qty):
+        """Sprzedaz czesci monet po rynku (siatka / DCA). Zwraca (cena, ilosc)."""
+        base = symbol.split("/")[0]
+        bal = self._balance()
+        free = float((bal.get("free") or {}).get(base) or 0)
+        amount = float(self.ex.amount_to_precision(symbol, min(qty, free)))
+        if amount <= 0:
+            raise self._err(f"brak {base} do sprzedania")
+        with self.lock:
+            o = self.ex.create_order(symbol, "market", "sell", amount)
+        o = self._wait(o, symbol)
+        e = self.entries.get(symbol)
+        if e:
+            e["qty"] = max(0.0, e["qty"] - float(o.get("filled") or amount))
+            self._save()
+        return float(o.get("average") or o.get("price") or 0), float(o.get("filled") or amount)
+
     def sell_stop_limit(self, symbol, qty, stop, limit):
         """Stop-limit na serwerze gieldy. Gdy gielda go nie przyjmie, stop pilnuje bot (sprawdza cene co cykl)."""
         if symbol in self.soft_stops:
@@ -413,6 +506,16 @@ class KrakenBroker:
         return "server"
 
     def close_position(self, symbol):
+        if self.id == "kraken" and getattr(self, "use_margin", False):
+            mp = self.margin_positions().get(norm(symbol))
+            if mp:
+                side = "sell" if mp["qty"] > 0 else "buy"
+                lev = int(mp.get("leverage") or 2)
+                with self.lock:
+                    o = self.ex.create_order(symbol, "market", side, float(self.ex.amount_to_precision(symbol, abs(mp["qty"]))),
+                                             None, {"leverage": lev, "reduce_only": True})
+                o = self._wait(o, symbol)
+                return {"qty": mp["qty"], "price": float(o.get("average") or o.get("price") or mp["price"])}
         base = symbol.split("/")[0]
         time.sleep(1)                          # anulowane zlecenia zwalniaja srodki z opoznieniem
         bal = self._balance()
@@ -454,26 +557,25 @@ def paper_broker_class():
         def _market_open(self, now=None):
             return True
 
-        def _buy(self, symbol, qty, price):
-            cost = qty * price * (1 + self.FEE)
-            from .brokers import BrokerError
-            if cost > self.state["cash"] + 1e-6:
-                raise BrokerError("za malo srodkow na koncie papierowym")
-            self.state["cash"] -= cost
-            s = norm(symbol)
-            p = self.state["positions"].get(s)
-            if p:
-                p["avg_entry"] = (p["avg_entry"] * p["qty"] + price * qty) / (p["qty"] + qty)
-                p["qty"] += qty
-            else:
-                self.state["positions"][s] = {"symbol": symbol, "qty": qty, "avg_entry": price}
+        def _fee(self, symbol):
+            return self.FEE
 
-        def _sell(self, symbol, qty, price):
-            s = norm(symbol)
-            p = self.state["positions"][s]
-            self.state["cash"] += qty * price * (1 - self.FEE)
-            p["qty"] -= qty
-            if p["qty"] <= 1e-12:
-                del self.state["positions"][s]
+        ROLLOVER = 0.0002                       # Kraken: oplata za otwarcie i co 4 h od wartosci pozycji na marginesie
+
+        def _accrue(self):
+            now = time.time()
+            for p in self.state["positions"].values():
+                if not p.get("margin"):
+                    continue
+                last = p.get("roll_t")
+                value = abs(p["qty"]) * self._price(p["symbol"])
+                if last is None:
+                    self.state["cash"] -= value * self.ROLLOVER
+                    p["roll_t"] = now
+                    continue
+                n = int((now - last) // (4 * 3600))
+                if n > 0:
+                    self.state["cash"] -= value * self.ROLLOVER * n
+                    p["roll_t"] = last + n * 4 * 3600
 
     return KrakenPaperBroker

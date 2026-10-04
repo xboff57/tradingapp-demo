@@ -203,13 +203,20 @@ function emptyChart(box, text) {
 }
 
 // ------------------------------------------------------------------ logowanie
+let SETUP = false, INSTALLED = false;
 function showLogin() {
   cleanup();
   $("#app").classList.add("hidden");
   $("#login").classList.remove("hidden");
   loginStep(1);
   api("GET", "/api/session").then(s => {
-    $("#login-hint").textContent = s.custom_login ? "Zaloguj się do panelu botów."
+    SETUP = !!s.setup;
+    $("#login-pass2-f").classList.toggle("hidden", !SETUP);
+    $("#login-pass").autocomplete = SETUP ? "new-password" : "current-password";
+    $("#login-btn").textContent = SETUP ? "Utwórz i wejdź" : "Zaloguj";
+    $("#login-hint").innerHTML = SETUP ? "<b>Witaj!</b> To pierwsze uruchomienie. Ustaw login i hasło do panelu (hasło min. 10 znaków). "
+        + "Zapisz je w menedżerze haseł — nie da się go odzyskać mailem."
+      : s.custom_login ? "Zaloguj się do panelu botów."
       : "Zaloguj się hasłem z pliku .env (login możesz zostawić pusty). Potem ustaw własny login w zakładce Logowanie.";
   }).catch(() => {});
   ($("#login-user").value ? $("#login-pass") : $("#login-user")).focus();
@@ -227,6 +234,17 @@ $("#login-form").addEventListener("submit", async e => {
   e.preventDefault();
   $("#login-err").textContent = "";
   const btn = $("#login-btn"); btn.disabled = true;
+  if (SETUP) {
+    try {
+      if ($("#login-pass").value !== $("#login-pass2").value) throw new Error("Hasła się różnią.");
+      await api("POST", "/api/setup", { username: $("#login-user").value, password: $("#login-pass").value });
+      $("#login-pass").value = $("#login-pass2").value = ""; SETUP = false; $("#login-pass2-f").classList.add("hidden");
+      sessionStorage.setItem("first_run", "1");
+      boot();
+    } catch (err) { $("#login-err").textContent = err.message; }
+    finally { btn.disabled = false; }
+    return;
+  }
   try {
     const r = await api("POST", "/api/login", { username: $("#login-user").value, password: $("#login-pass").value,
       code: $("#login-step2").classList.contains("hidden") ? "" : $("#login-code").value });
@@ -261,6 +279,9 @@ const routes = [
   [/^#\/radar\/crypto$/, "radar", renderRadar],
   [/^#\/radar\/(gpw|usa)$/, "radar", renderRadarStocks],
   [/^#\/lab$/, "lab", renderLab],
+  [/^#\/calendar$/, "calendar", renderCalendar],
+  [/^#\/risk$/, "risk", renderRisk],
+  [/^#\/gallery$/, "gallery", renderGallery],
   [/^#\/ml\/(\d+)$/, "ml", renderMlModel],
 ];
 async function route() {
@@ -286,7 +307,7 @@ async function route() {
   }
   location.hash = "#/";
 }
-window.addEventListener("hashchange", () => { $("#side").classList.remove("open"); $("#menu-btn").setAttribute("aria-expanded", "false"); route(); });
+window.addEventListener("hashchange", () => { closeModal(); $("#side").classList.remove("open"); $("#menu-btn").setAttribute("aria-expanded", "false"); route(); });
 $("#menu-btn").addEventListener("click", () => {
   const open = $("#side").classList.toggle("open");
   $("#menu-btn").setAttribute("aria-expanded", String(open));
@@ -296,6 +317,7 @@ async function boot() {
   const s = await api("GET", "/api/session");
   if (!s.logged_in) return showLogin();
   DEMO = !!s.demo;
+  INSTALLED = !!s.installed;
   document.body.classList.toggle("demo", DEMO);
   if (DEMO) demoBar();
   $("#login").classList.add("hidden");
@@ -359,6 +381,9 @@ async function mlBadge() {
     lb.textContent = s.lab_pending || "";
     lb.title = s.lab_pending ? "zwycięzca laboratorium czeka na zatwierdzenie" : "";
     lb.classList.toggle("hidden", !s.lab_pending);
+    try { const r = await api("GET", "/api/risk"); const rb = $("#risk-badge");
+      const bad = r.halt ? "wyłącznik włączony" : r.accounts.some(a => a.tripped) ? "dzienny limit straty zadziałał" : "";
+      rb.textContent = bad ? "!" : ""; rb.title = bad; rb.classList.toggle("hidden", !bad); } catch (e) { /* bez znaczenia */ }
     const g = await api("GET", "/api/gateway");
     const bad = gwProblem(g);
     const gb = $("#gw-badge"); gb.textContent = bad ? "!" : ""; gb.title = bad || ""; gb.classList.toggle("hidden", !bad);
@@ -373,6 +398,7 @@ async function renderDash() {
     <div class="page-head"><h1>Pulpit</h1>
       <div class="actions"><a class="btn" href="#/backtests">Nowy backtest</a>
       <button class="btn primary" id="new-bot">Nowy bot</button></div></div>
+    <div id="first-steps"></div>
     <div class="grid kpis" id="kpis"></div>
     <div class="grid two">
       <div class="card"><div class="card-head"><h2>Kapitał kont</h2>${rangeSeg()}</div>
@@ -386,6 +412,20 @@ async function renderDash() {
   $$(".seg button").forEach(b => b.onclick = () => { dashRange = +b.dataset.d; loadDash(true); });
   await loadDash(true);
   every(30000, () => loadDash(false));
+  const ov = await api("GET", "/api/overview");
+  if (!ov.bots.length && !DEMO) {
+    const real = SCHEMA.accounts.some(a => a.type !== "sim");
+    $("#first-steps").innerHTML = `<div class="card" style="margin-bottom:14px"><h2>Pierwsze kroki</h2>
+      <ol class="small" style="margin:8px 0 0 18px;line-height:1.9">
+        <li>${real ? "✓ Konto podłączone." : `<a href="#/accounts">Konta</a> → <b>+ Podłącz platformę</b>: darmowe konto <b>Alpaca Paper</b> (akcje USA na niby) albo <b>Kraken</b> w trybie na niby (krypto).
+          Na start wystarczy też wbudowane konto <b>demo</b> (symulacja).`}</li>
+        <li><a href="#/gallery">Galeria strategii</a> → wybierz strategię → <b>Backtest na moich danych</b>, żeby zobaczyć, jak by sobie radziła.</li>
+        <li>Spodobała się? <b>Utwórz bota</b> na koncie papierowym i kliknij <b>Start</b>. Bot działa, dopóki działa ten komputer.</li>
+        <li><a href="#/system">System</a> → <b>Powiadomienia</b>: transakcje i problemy na telefon (ntfy albo Telegram).</li>
+        <li><a href="#/security">Logowanie</a> → włącz <b>kod z aplikacji (2FA)</b>.</li>
+      </ol>
+      <p class="muted small" style="margin-top:8px">Prawdziwe pieniądze dopiero po kilku tygodniach na papierze. Klucze API giełd zawsze <b>bez prawa wypłaty</b>.</p></div>`;
+  }
 }
 function rangeSeg() {
   return `<div class="seg">${[[1, "1D"], [7, "7D"], [30, "30D"], [90, "90D"]].map(([d, l]) =>
@@ -434,7 +474,7 @@ function botsTable(bots) {
     ${bots.map(b => `<tr class="link" data-id="${b.id}">
       <td><b>${esc(b.name)}</b><div class="muted small">${esc(b.timeframe)} · ${b.symbols.length} symb. · budżet ${pct(b.allocation_pct * 100, 0, false)}</div></td>
       <td>${statusPill(b.status)}</td><td>${MARKET[b.market]}</td><td>${esc(b.account)}</td>
-      <td class="small">${esc(b.strategy_name)}</td>
+      <td class="small">${esc(b.strategy_name)}${levTag(b.lev)}</td>
       <td class="num ${tone(b.total_pnl)}">${usd(b.total_pnl, true)}</td>
       <td class="num ${tone(b.realized)}">${usd(b.realized, true)}</td>
       <td class="num ${tone(b.unrealized)}">${usd(b.unrealized, true)}</td>
@@ -525,8 +565,18 @@ function paramsHtml(market, strategy, values) {
   const radp = common.filter(s => s.group === "radar");
   const labp = common.filter(s => s.group === "lab");
   const sigp = common.filter(s => s.group === "signals");
-  const adv = common.filter(s => !basic.includes(s) && !risk.includes(s) && !["ext", "ml", "exits", "radar", "lab", "signals"].includes(s.group));
+  const levp = common.filter(s => s.group === "lev");
+  const adv = common.filter(s => !basic.includes(s) && !risk.includes(s) && !["ext", "ml", "exits", "radar", "lab", "signals", "lev"].includes(s.group));
   const f = specs => specs.map(s => fieldHtml(s, values[s.key])).join("");
+  const special = ["grid", "dca"].includes(strategy), noMl = special || strategy === "tv_alerts";
+  if (special) return `
+    <fieldset><legend>Symbole i interwał</legend><div class="form-grid">${f(basic)}</div>
+      <p class="muted small" style="margin:10px 0 0">Budżet bota dzielony jest po równo między symbole. Interwał służy tylko backtestowi — na żywo bot sprawdza cenę co cykl.</p></fieldset>
+    <fieldset><legend>Strategia: ${esc(stratInfo?.name || "")}</legend>
+      <p class="muted small" style="margin:0 0 10px">${esc(stratInfo?.description || "")}</p>
+      <div class="form-grid">${f(strat)}</div>
+      <div class="note warn" style="margin-top:10px">Bez stop-lossa na serwerze brokera — wyjścia pilnuje bot w każdym cyklu. Dźwignia i ML są tu wyłączone.</div></fieldset>
+    <fieldset><legend>Okazje na telefon</legend><div class="form-grid">${f(sigp)}</div></fieldset>`;
   return `
     <fieldset><legend>Symbole i interwał</legend><div class="form-grid">${f(basic)}</div></fieldset>
     <fieldset><legend>Strategia: ${esc(stratInfo?.name || "")}</legend>
@@ -534,6 +584,12 @@ function paramsHtml(market, strategy, values) {
       <div class="form-grid">${f(strat)}</div></fieldset>
     <fieldset><legend>Ryzyko</legend><div class="form-grid">${f(risk)}</div>
       <div class="note" id="risk-note" style="margin-top:12px"></div></fieldset>
+    <fieldset class="lev-fs"><legend>Dźwignia i gra na spadki — dla bardziej ryzykownych</legend>
+      <div class="note warn" style="margin:0 0 10px">Dźwignia zwiększa zyski i straty tak samo. Gra na spadek (krótka sprzedaż) przy marginesie
+      może przynieść stratę większą niż wkład, gdy cena gwałtownie rośnie (stop-loss przy luce cenowej wykona się gorzej).
+      ETF-y lewarowane tracą wartość przy długim trzymaniu w rynku bez trendu. Na koncie z prawdziwymi pieniędzmi bot wystartuje
+      dopiero po Twojej zgodzie w zakładce <a href="#/risk">Ryzyko</a>; tam jest też wyłącznik i dzienny limit straty.</div>
+      <div class="form-grid">${f(levp)}</div><div class="note" id="lev-note" style="margin-top:10px"></div></fieldset>
     <fieldset><legend>Wyjścia z pozycji — obok stop-lossa i take-profitu</legend>
       <p class="muted small" style="margin:0 0 10px">Pilnuje ich bot w każdym cyklu; twardy stop-loss zostaje na serwerze brokera jako zabezpieczenie.</p>
       <div class="form-grid">${f(exitp)}</div></fieldset>
@@ -541,20 +597,20 @@ function paramsHtml(market, strategy, values) {
       <p class="muted small" style="margin:0 0 10px">Insiderzy (SEC Form 4) i fundusze (SEC 13F) jako weto albo potwierdzenie
       sygnału technicznego. Działa dla akcji pojedynczych spółek z USA — ETF-y nie mają insiderów. Podgląd danych: zakładka „Sygnały”.</p>
       <div class="form-grid">${f(extp)}</div></fieldset>` : ""}
-    <fieldset><legend>Uczenie maszynowe (ML)</legend>
+    ${noMl ? "" : `<fieldset><legend>Uczenie maszynowe (ML)</legend>
       <p class="muted small" style="margin:0 0 10px">${strategy === "ml_model"
         ? "Ta strategia to sam model — ustaw, jak pewny musi być, żeby wejść, i na jakim okresie ma się uczyć."
         : "Model uczy się na historii, które wejścia z tym stop-lossem i take-profitem kończyły się zyskiem, i ocenia każdy sygnał strategii."}
       W backteście uczy się krocząco (tylko na przeszłości). Dla bota na żywo nowy model powstaje co tydzień i czeka na Twoją akceptację w zakładce „ML”.</p>
-      <div class="form-grid">${f(mlp)}</div></fieldset>
+      <div class="form-grid">${f(mlp)}</div></fieldset>`}
     ${radp.length ? `<fieldset><legend>Radar altcoinów</legend>
       <p class="muted small" style="margin:0 0 10px">Codziennie ranking monet z giełdy konta (siła względem BTC, momentum, rosnący obrót, trend).
       Bot handluje N najlepszymi i zawsze pilnuje monet, które już ma. Stablecoiny są pomijane. Podgląd: zakładka „Radar”.</p>
       <div class="form-grid">${f(radp)}</div></fieldset>` : ""}
-    <fieldset><legend>Laboratorium wariantów</legend>
+    ${noMl ? "" : `<fieldset><legend>Laboratorium wariantów</legend>
       <p class="muted small" style="margin:0 0 10px">Obok bota grają „na niby” jego warianty z jedną zmianą (a dla botów ML także model douczany co noc).
       Zwycięzca przejmuje bota automatycznie na koncie papierowym, a na koncie z prawdziwymi pieniędzmi — po Twoim zatwierdzeniu. Wyniki: zakładka „Laboratorium”.</p>
-      <div class="form-grid">${f(labp)}</div></fieldset>
+      <div class="form-grid">${f(labp)}</div></fieldset>`}
     <fieldset><legend>Okazje na telefon — do ręcznego kopiowania</legend>
       <p class="muted small" style="margin:0 0 10px">Gdy bot kupi albo sprzeda, dostaniesz powiadomienie z ceną, stop-lossem i kwotą dla Ciebie.
       Telefon podłączysz w zakładce System → Powiadomienia.</p>
@@ -575,6 +631,28 @@ function readParams(root) {
   });
   Object.keys(out).forEach(k => out[k] == null && delete out[k]);
   return out;
+}
+const SIDE_LABEL = { BUY: "Kupno", SELL: "Sprzedaż", SHORT: "Sprzedaż krótka ↓", COVER: "Odkupienie" };
+function levTag(l) {
+  if (!l) return "";
+  const dir = { long: "↑", short: "↓", both: "↑↓" }[l.direction] || "";
+  return l.mode === "etf" ? ` <span class="f-tag warn" title="ETF-y lewarowane / odwrotne">ETF ${dir}</span>`
+    : ` <span class="f-tag down" title="margin u brokera">${num(l.leverage, 1)}× ${dir}</span>`;
+}
+function levNote(root) {
+  const p = readParams(root), el = $("#lev-note", root);
+  if (!el) return;
+  const mode = p.leverage_mode || "off";
+  if (mode === "off") { el.className = "note"; el.textContent = "Wyłączone — bot tylko kupuje za własne pieniądze (jak dotąd)."; return; }
+  const lev = mode === "margin" ? (p.leverage || 1) : 1, sl = (p.stop_loss_pct || 0);
+  const dir = { long: "tylko na wzrost", short: "tylko na spadek", both: "na wzrost i na spadek" }[p.direction || "long"];
+  el.className = "note warn";
+  el.innerHTML = mode === "etf"
+    ? `Bot gra ${dir}: sygnał liczy na spółce, a kupuje ETF 2× (wzrost) albo odwrotny (spadek). Stop-loss i take-profit
+       przeliczane na ETF (przy 2× ruch spółki o ${num(sl * 100, 1)}% to ok. ${num(sl * 200, 1)}% ETF-u). Spółki bez ETF-u na liście bot pomija.`
+    : `Bot gra ${dir} z dźwignią <b>${num(lev, 1)}×</b>: pozycje do ${num(lev * 100, 0)}% budżetu łącznie.
+       Jedna strata na stopie to ok. <b>${num(sl * lev * 100, 1)}%</b> budżetu pozycji (plus poślizg).
+       Koszty: odsetki od pożyczki (akcje ok. 7% rocznie od pożyczonej części, Kraken 0,02% co 4 h).`;
 }
 function riskNote(root) {
   const p = readParams(root);
@@ -601,7 +679,9 @@ function setupEditor(root, init) {
     box.innerHTML = paramsHtml(state.market, state.strategy, state.params);
     $$(".rules", box).forEach(drawRules);
     riskNote(root);
-    $$("input,select", box).forEach(el => el.addEventListener("input", () => riskNote(root)));
+    levNote(root);
+    $$("input,select", box).forEach(el => el.addEventListener("input", () => { riskNote(root); levNote(root); }));
+    $$("select", box).forEach(el => el.addEventListener("change", () => levNote(root)));
   };
   $("#f-market", root).onchange = e => {
     state = { market: e.target.value, strategy: state.strategy, params: defaultsFor(e.target.value, state.strategy) };
@@ -687,8 +767,9 @@ async function renderBot(id) {
     <div class="page-head"><div><a href="#/bots" class="muted small" style="text-decoration:none">← Boty</a>
       <h1 style="display:flex;gap:10px;align-items:center;margin-top:4px">${esc(b.name)} ${statusPill(b.status)}</h1>
       <div class="muted small" style="margin-top:4px">${MARKET[b.market]} · konto <b>${esc(b.account)}</b> ·
-        ${esc(SCHEMA.strategies.find(s => s.key === b.strategy)?.name)} · ${esc(p.timeframe)} · budżet ${pct(p.allocation_pct * 100, 0, false)} ·
-        ryzyko ${pct(p.risk_per_trade_pct * 100, 1, false)} · SL ${pct(p.stop_loss_pct * 100, 1, false)} · TP ${pct(p.take_profit_pct * 100, 1, false)}</div></div>
+        ${esc(SCHEMA.strategies.find(s => s.key === b.strategy)?.name)} · ${esc(p.timeframe)} · budżet ${pct(p.allocation_pct * 100, 0, false)}
+        ${["grid", "dca"].includes(b.strategy) ? "" : `· ryzyko ${pct(p.risk_per_trade_pct * 100, 1, false)} · SL ${pct(p.stop_loss_pct * 100, 1, false)} · TP ${pct(p.take_profit_pct * 100, 1, false)}`}
+        ${p.leverage_mode && p.leverage_mode !== "off" ? levTag({ mode: p.leverage_mode, direction: p.direction, leverage: p.leverage }) : ""}</div></div>
       <div class="actions">
         ${running ? `<button class="btn" id="b-stop">Stop</button><button class="btn danger" id="b-stopclose">Stop i zamknij pozycje</button>`
                   : `<button class="btn primary" id="b-start">Start</button>`}
@@ -708,6 +789,8 @@ async function renderBot(id) {
       ${metric("Symbole", p.symbols.length)}
     </div>
     ${b.ml?.uses_ml ? mlBotCard(b) : ""}
+    ${b.special ? specialCard(b) : ""}
+    ${b.strategy === "tv_alerts" ? `<div class="card" id="tv-box" style="margin-bottom:14px"><h2>Alerty z TradingView</h2><div class="empty">Ładowanie…</div></div>` : ""}
     <div class="grid two">
       <div class="card"><h2>Otwarte pozycje</h2>${positionsTable(b.positions, b.positions_error)}</div>
       <div class="card"><h2>Wynik w czasie</h2><div class="chart-box small" id="pnl-chart"><canvas></canvas></div></div>
@@ -737,6 +820,7 @@ async function renderBot(id) {
   $("#b-mltrain") && ($("#b-mltrain").onclick = () => act(() => api("POST", `/api/bots/${id}/ml/train`),
     "Uczenie modelu rozpoczęte — wynik pojawi się w zakładce ML"));
 
+  if (b.strategy === "tv_alerts") await drawTv(id);
   const eq = await api("GET", "/api/equity?days=90");
   const pts = eq.bots[id]?.points || [];
   if (pts.length > 1) lineChart($("#pnl-chart canvas"), [{ label: "Wynik", points: pts }]);
@@ -779,7 +863,7 @@ function tradesTable(rows, withBot = false) {
   return `<table><thead><tr><th>Czas</th>${withBot ? "<th>Bot</th>" : ""}<th>Symbol</th><th>Strona</th>
     <th class="num">Ilość</th><th class="num">Cena</th><th class="num">Wartość</th><th class="num">P/L</th><th>Powód</th></tr></thead><tbody>
     ${rows.map(t => `<tr><td class="small">${when(t.ts)}</td>${withBot ? `<td><a href="#/bot/${t.bot_id}">${esc(t.bot_name)}</a></td>` : ""}
-      <td><a class="sym" href="#/chart/${encodeURIComponent(t.symbol)}" title="Pokaż wykres"><b>${esc(t.symbol)}</b></a></td><td class="${t.side === "BUY" ? "" : "muted"}">${t.side === "BUY" ? "Kupno" : "Sprzedaż"}</td>
+      <td><a class="sym" href="#/chart/${encodeURIComponent(t.symbol)}" title="Pokaż wykres"><b>${esc(t.symbol)}</b></a></td><td class="${t.side === "BUY" ? "" : t.side === "SHORT" ? "down" : "muted"}">${SIDE_LABEL[t.side] || t.side}</td>
       <td class="num">${num(t.qty, 6)}</td><td class="num">${price(t.price)}</td><td class="num">${usd(t.value)}</td>
       <td class="num ${tone(t.pnl)}">${t.pnl == null ? "" : usd(t.pnl, true) + `<div class="small">${pct(t.pnl_pct)}</div>`}</td>
       <td class="small muted">${esc(t.reason || "")}</td></tr>`).join("")}</tbody></table>`;
@@ -805,8 +889,8 @@ async function renderBacktests() {
           <option value="stocks" ${init.market === "stocks" ? "selected" : ""}>Akcje / ETF</option>
           <option value="crypto" ${init.market === "crypto" ? "selected" : ""}>Krypto</option></select></div>
         <div class="field"><label>Strategia</label><select id="f-strategy">${strategyOptions(init.strategy)}</select></div>
-        <div class="field"><label>Od</label><input type="date" id="f-start" value="${iso(yearAgo)}"></div>
-        <div class="field"><label>Do</label><input type="date" id="f-end" value="${iso(today)}" max="${iso(today)}"></div>
+        <div class="field"><label>Od</label><input type="date" id="f-start" value="${esc(preset?.start || iso(yearAgo))}"></div>
+        <div class="field"><label>Do</label><input type="date" id="f-end" value="${esc(preset?.end && preset.end < iso(today) ? preset.end : iso(today))}" max="${iso(today)}"></div>
         <div class="field"><label>Kapitał startowy</label><div class="suffix"><input type="number" id="f-cap" value="100000" min="1000"><span>$</span></div></div>
         <div class="field"><label>Koszt transakcji (na stronę)</label><div class="suffix"><input type="number" step="any" id="f-cost" placeholder="auto"><span>%</span></div>
           <div class="help">Puste = 0,05% akcje, 0,25% krypto (prowizja + poślizg)</div></div>
@@ -826,6 +910,8 @@ async function renderBacktests() {
     <div class="card" style="margin-top:14px"><h2>Historia testów</h2><div id="bt-list"></div></div>`;
   const root = $("#bt-form");
   const read = setupEditor(root, init);
+  if (preset?.data_source && $(`#f-src option[value="${preset.data_source}"]`)) $("#f-src").value = preset.data_source;
+  else if (preset?.data_source === "alpaca") $("#f-src").value = "auto";
   $("#f-template").addEventListener("change", async e => {
     if (!e.target.value.startsWith("bot:")) return;
     const b = await api("GET", `/api/bots/${e.target.value.slice(4)}`);
@@ -1367,7 +1453,10 @@ async function renderSystem() {
   view.innerHTML = `<div class="page-head"><h1>System</h1></div>
     <div class="stack">
       <div id="sys-top"></div>
-      <div class="card"><h2>Wgraj nową wersję</h2>
+      ${INSTALLED ? `<div class="card"><h2>Aktualizacje</h2><p class="muted" style="margin:0">Ta wersja jest zainstalowana instalatorem.
+        Nową wersję pobierasz z GitHuba (<a href="https://github.com/xboff57/tradingapp-demo/releases/latest" target="_blank" rel="noopener">Releases → TradingApp-Setup.exe</a>)
+        i uruchamiasz instalator — boty, konta, hasło i historia zostają.</p></div>` : ""}
+      <div class="card${INSTALLED ? " hidden" : ""}"><h2>Wgraj nową wersję</h2>
         <p class="muted" style="margin:0 0 12px">Wybierz <b>podpisaną</b> paczkę <b>tradingapp.zip</b> (oficjalne wydanie z folderu <i>wydania</i> w repozytorium). Paczki bez podpisu autora są odrzucane. Aktualizator zrobi kopię bazy i kodu,
           podmieni kod (bez ruszania .env i danych), sprawdzi, czy aplikacja wstała, a w razie problemu przywróci poprzednią wersję.
           Domyślnie czeka z tym do zamknięcia rynku w USA (22:00 czasu PL), żeby nie przerywać botom sesji.</p>
@@ -1508,6 +1597,7 @@ async function drawNotify() {
       ${tg || nt ? `<button class="btn small" id="nt-test">Wyślij test</button>` : ""}
       ${n.last_error ? `<span class="small down">Ostatni błąd wysyłki: ${esc(n.last_error)}</span>` : ""}
     </div>
+    <div class="hb-box" id="hb-box"></div>
     <div class="small muted" style="margin-bottom:6px">Co wysyłać:</div>
     <div class="form-grid">${Object.entries(n.labels).map(([k, l]) => `<label class="check small" style="padding-top:0"><input type="checkbox" data-ev="${k}" ${n.events[k] ? "checked" : ""}> ${esc(l)}</label>`).join("")}</div>`;
   if (nt && window.qrcode) { const q = qrcode(0, "M"); q.addData(url); q.make(); $("#nt-qr").innerHTML = q.createSvgTag({ cellSize: 3, margin: 2, scalable: true }); }
@@ -1519,10 +1609,37 @@ async function drawNotify() {
     try { const r = await api("POST", "/api/notify/connect"); toast(`Połączono z czatem: ${r.who}`); drawNotify(); } catch (e) { toast(e.message, true); } });
   $("#nt-test") && ($("#nt-test").onclick = async () => {
     try { await api("POST", "/api/notify/test"); toast("Wysłano — sprawdź telefon"); } catch (e) { toast(e.message, true); } });
+  drawHeartbeat();
   $$("[data-ev]", box).forEach(c => c.onchange = async () => {
     const ev = {}; $$("[data-ev]", box).forEach(x => ev[x.dataset.ev] = x.checked);
     await api("PUT", "/api/notify/events", { events: ev }); toast("Zapisano");
   });
+}
+
+async function drawHeartbeat() {
+  const box = $("#hb-box");
+  if (!box) return;
+  let h;
+  try { h = await api("GET", "/api/notify/heartbeat"); } catch (e) { box.innerHTML = ""; return; }
+  const st = h.last ? (h.ok ? (h.problems.length ? `<span class="warn">ostatni ping ${when(h.last)}: zgłoszony problem — ${esc(h.problems.join("; "))}</span>`
+    : `<span class="up">ostatni ping ${when(h.last)}: OK</span>`) : `<span class="down">ostatni ping ${when(h.last)} nieudany: ${esc(h.error || "")}</span>`) : "";
+  box.innerHTML = `<h3>Strażnik z zewnątrz ${h.enabled ? '<span class="f-tag up">włączony</span>' : '<span class="f-tag muted">wyłączony</span>'}</h3>
+    <p class="small" style="margin:0 0 8px">Gdy NAS padnie albo straci prąd lub internet, nie wyśle żadnego powiadomienia — robi to wtedy serwis z zewnątrz.
+      Panel co ${h.every_min} min daje znak życia; gdy znaki przestaną przychodzić (albo panel zgłosi problem), dostajesz maila, SMS-a albo powiadomienie.</p>
+    ${h.enabled ? `<div class="small" style="margin-bottom:8px">Adres: <span class="mono">${esc(h.url_masked)}</span> · ${st}</div>
+      <div class="acc-actions"><button class="btn small" id="hb-test">Wyślij ping teraz</button><button class="btn small" id="hb-off">Wyłącz</button></div>`
+    : `<ol class="small" style="margin:0 0 10px;padding-left:18px">
+        <li>Załóż darmowe konto na <a href="https://healthchecks.io" target="_blank" rel="noopener noreferrer">healthchecks.io</a> i kliknij „Add Check”.</li>
+        <li>Ustaw <b>Period: 5 minutes</b> i <b>Grace: 10 minutes</b>; w „Integrations” dodaj e-mail (albo SMS / Telegram / ntfy).</li>
+        <li>Skopiuj „Ping URL” (https://hc-ping.com/…) i wklej poniżej — panel od razu wyśle próbny ping.</li></ol>
+      <form id="hb-form" style="display:flex;gap:8px;flex-wrap:wrap"><input id="hb-url" placeholder="https://hc-ping.com/…" style="flex:1;min-width:240px" autocomplete="off">
+        <button class="btn primary small">Zapisz i sprawdź</button></form>`}
+    <p class="small muted" style="margin:8px 0 0">Adres pingu działa jak hasło — nie udostępniaj go.</p>`;
+  if ($("#hb-form")) $("#hb-form").onsubmit = async e => { e.preventDefault();
+    try { await api("PUT", "/api/notify/heartbeat", { url: $("#hb-url").value }); toast("Zapisano — ping wysłany"); drawHeartbeat(); } catch (er) { toast(er.message, true); } };
+  if ($("#hb-test")) $("#hb-test").onclick = async () => { try { await api("POST", "/api/notify/heartbeat/test"); toast("Ping wysłany"); drawHeartbeat(); } catch (er) { toast(er.message, true); } };
+  if ($("#hb-off")) $("#hb-off").onclick = async () => { if (!confirm("Wyłączyć strażnika? Healthchecks.io po chwili zgłosi brak pingów — wstrzymaj tam też sprawdzanie.")) return;
+    try { await api("PUT", "/api/notify/heartbeat", { url: "" }); drawHeartbeat(); } catch (er) { toast(er.message, true); } };
 }
 
 // etapy aktualizacji - rysowane ze statusu zapisywanego przez aktualizator
@@ -2368,7 +2485,7 @@ async function renderSecurity() {
 
 // ------------------------------------------------------------------ bramka IB Gateway
 function gwProblem(g) {
-  if (!g.connections.length) return "";
+  if (!g.connections.length || g.weekend) return "";
   if (g.container.exists && g.container.status && g.container.status !== "running") return "Kontener bramki nie działa";
   const c = g.connections.find(x => !x.api || !x.server_ok);
   if (!c) return "";
@@ -2429,8 +2546,11 @@ async function renderGateway() {
           <label class="check" style="padding-top:0"><input type="checkbox" id="gw-auto" ${st.auto_restart ? "checked" : ""}>
             Restartuj bramkę, gdy nie ma połączenia z IBKR dłużej niż</label>
           <div class="seg" id="gw-th">${[5, 10, 15, 30, 60].map(m => `<button data-m="${m}" class="${m === st.threshold_min ? "on" : ""}">${m} min</button>`).join("")}</div>
+          <label class="check" style="padding-top:0"><input type="checkbox" id="gw-weekend" ${st.weekend_pause !== false ? "checked" : ""}>
+            Wstrzymaj w weekend (pt 23:00 – pn 06:00): giełdy są zamknięte, bez restartów i powiadomień</label>
+          ${g.weekend ? `<p class="small" style="margin:0;color:var(--info)">Teraz weekend — brak połączenia jest normalny (prace IBKR). Restart, jeśli trzeba, w poniedziałek o 6:00.</p>` : ""}
           <p class="small muted" style="margin:0">Najwyżej raz na 30 minut i 4 razy na 6 godzin; nie w nocy (23:45–00:15 bramka
-            restartuje się sama). Każdy problem i powrót połączenia trafia do historii i na Telegram.</p>
+            restartuje się sama). Każdy problem i powrót połączenia trafia do historii i do powiadomień.</p>
         </div>
       </div>
       <div class="card" style="margin-top:14px"><h2>Historia</h2><ul class="gw-events">${ev}</ul></div>
@@ -2457,6 +2577,7 @@ async function renderGateway() {
     const save = async ch => { try { await api("PUT", "/api/gateway/settings", ch); toast("Zapisano"); draw(); } catch (e) { toast(e.message, true); } };
     $("#gw-auto").onchange = e => save({ auto_restart: e.target.checked });
     $$("#gw-th button").forEach(b => b.onclick = () => save({ threshold_min: +b.dataset.m }));
+    $("#gw-weekend").onchange = e => save({ weekend_pause: e.target.checked });
   };
   try { gwProblem.totp = (await api("GET", "/api/security")).totp; } catch (e) { gwProblem.totp = false; }
   await draw();
@@ -2477,7 +2598,8 @@ function smaSeries(bars, n) {
   bars.forEach((b, i) => { sum += b[4]; if (i >= n) sum -= bars[i - n][4]; if (i >= n - 1) out.push({ time: b[0], value: sum / n }); });
   return out;
 }
-let chartState = { tf: "1Day", source: "auto", sma: { 20: true, 50: true, 200: false }, plan: "default", pat: true, off: [] };
+let chartState = { tf: "1Day", source: "auto", sma: { 20: true, 50: true, 200: false }, plan: "default", pat: true, off: [], fund: true };
+const fundCache = {};
 try { Object.assign(chartState, JSON.parse(localStorage.getItem("chartState") || "{}")); } catch (e) { /* bez znaczenia */ }
 async function renderChart(symParam) {
   const sym = symParam ? decodeURIComponent(symParam).toUpperCase() : "";
@@ -2558,6 +2680,7 @@ async function renderChart(symParam) {
             <span>Max <b class="mono">${price(hi)}</b></span><span>Min <b class="mono">${price(lo)}</b></span></div>
         </div>
         <div class="ch-tools">${[20, 50, 200].map(n => `<label class="ch-sma s${n}"><input type="checkbox" data-sma="${n}" ${chartState.sma[n] ? "checked" : ""}> SMA ${n}</label>`).join("")}
+          <label class="ch-sma"><input type="checkbox" id="ch-fund-cb" ${chartState.fund !== false ? "checked" : ""}> Finanse</label>
           <label class="ch-sma"><input type="checkbox" id="ch-pat" ${chartState.pat ? "checked" : ""}> Formacje i poziomy</label>
           <button class="btn small ghost" id="ch-pat-set" type="button" aria-expanded="false">Wybierz formacje</button>
           ${d.trades.length ? `<span class="small muted">▲ kupno · ▼ sprzedaż botów (${d.trades.length})</span>` : ""}</div>
@@ -2566,6 +2689,7 @@ async function renderChart(symParam) {
         ${d.levels.length ? `<div class="ch-levels">${d.levels.map(l => `<span><b>${esc(l.bot)}</b>: wejście <b class="mono">${price(l.entry)}</b>
           ${l.sl ? ` · stop-loss <b class="mono down">${price(l.sl)}</b>` : ""}${l.tp ? ` · take-profit <b class="mono up">${price(l.tp)}</b>` : ""}</span>`).join("")}</div>` : ""}
       </div>
+      <div id="ch-fund"></div>
       ${patternsCard(X)}
       ${planCard(d.plan)}
       ${d.trades.length ? `<div class="card table-wrap" style="margin-top:14px"><h2>Transakcje botów na ${esc(d.symbol)}</h2>${tradesTable([...d.trades].reverse(), true)}</div>` : ""}`;
@@ -2598,11 +2722,13 @@ async function renderChart(symParam) {
     // zakupy i sprzedaze botow na swiecach (dopasowane do swiecy, w ktorej byly)
     const t0 = b[0][0], times = b.map(x => x[0]);
     const snap = ts => { const t = Math.floor(Date.parse(ts) / 1000); let k = times.length - 1; while (k > 0 && times[k] > t) k--; return t < t0 ? null : times[k]; };
-    const marks = d.trades.map(t => ({ time: snap(t.ts), buy: t.side === "BUY", t })).filter(m => m.time)
-      .map(m => ({ time: m.time, position: m.buy ? "belowBar" : "aboveBar", shape: m.buy ? "arrowUp" : "arrowDown",
-        color: m.buy ? css("--accent") : (m.t.pnl == null ? css("--muted") : m.t.pnl >= 0 ? up : down),
-        text: m.buy ? "K" : (m.t.pnl_pct == null ? "S" : (m.t.pnl_pct >= 0 ? "+" : "") + m.t.pnl_pct.toFixed(1) + "%") }))
-      ;
+    const marks = d.trades.map(t => ({ time: snap(t.ts), t })).filter(m => m.time).map(m => {
+      const sd = m.t.side, open = sd === "BUY" || sd === "SHORT", up_ = sd === "BUY" || sd === "COVER";
+      const res = m.t.pnl_pct == null ? null : (m.t.pnl_pct >= 0 ? "+" : "") + m.t.pnl_pct.toFixed(1) + "%";
+      return { time: m.time, position: up_ ? "belowBar" : "aboveBar", shape: up_ ? "arrowUp" : "arrowDown",
+        color: open ? (sd === "SHORT" ? "#ff9f43" : css("--accent")) : (m.t.pnl == null ? css("--muted") : m.t.pnl >= 0 ? up : down),
+        text: sd === "BUY" ? "K" : sd === "SHORT" ? "S↓" : (res || (sd === "COVER" ? "O" : "S")) };
+    });
     const P = d.plan && !d.plan.error ? d.plan : null, info = css("--info");
     if (P) P.trades.forEach(t => {
       const et = snap(new Date(t.entry_t * 1000).toISOString()), xt = snap(new Date(t.exit_t * 1000).toISOString());
@@ -2632,7 +2758,10 @@ async function renderChart(symParam) {
     }
     marks.sort((a, c) => a.time - c.time);
     candles.setMarkers(marks);
+    chartMarks = { candles, marks, snap, symbol: d.symbol };
     $("#ch-pat").onchange = e => { chartState.pat = e.target.checked; save(); render(d, symbol); };
+    $("#ch-fund-cb").onchange = e => { chartState.fund = e.target.checked; save(); loadFund(d, false); };
+    loadFund(d, false);
     $("#ch-pat-set").onclick = () => { const p = $("#ch-pat-panel"); p.classList.toggle("hidden");
       $("#ch-pat-set").setAttribute("aria-expanded", String(!p.classList.contains("hidden"))); };
     const setOff = off => { chartState.off = off; chartState.pat = true; save(); render(d, symbol);
@@ -2658,6 +2787,133 @@ async function renderChart(symParam) {
     ch.timeScale().setVisibleLogicalRange({ from: b.length - vis, to: b.length + 3 });
     charts.push({ destroy: () => { if (curChart === ch) { ch.remove(); curChart = null; } } });
   }
+}
+
+// ------------------------------------------------------------------ RYZYKO
+async function renderRisk() {
+  const draw = async () => {
+    const d = await api("GET", "/api/risk");
+    const pct = v => v ? num(v * 100, 1) + "%" : "wyłączony";
+    const accRows = d.accounts.map(a => `<tr>
+      <td><b>${esc(a.name)}</b><div class="small muted">${esc(a.type)}</div></td>
+      <td>${a.real ? '<span class="f-tag down">prawdziwe pieniądze</span>' : '<span class="f-tag muted">papier / symulacja</span>'}</td>
+      <td class="num mono">${a.equity != null ? num(a.equity, 0) : "—"}</td>
+      <td class="num mono">${a.gross_lev != null ? num(a.gross_lev, 2) + "×" : "—"}</td>
+      <td>${a.real ? `<label class="check small" style="padding:0"><input type="checkbox" data-consent="${esc(a.name)}" ${a.consent ? "checked" : ""}>
+          ${a.consent ? "zgoda od " + when(a.since) : "brak zgody"}</label>` : '<span class="small muted">nie wymaga</span>'}</td>
+      <td><select data-maxlev="${esc(a.name)}">${[0, 1, 1.5, 2, 3, 5].map(v => `<option value="${v}" ${(+a.max_leverage || 0) === v ? "selected" : ""}>${v ? v + "×" : "domyślny"}</option>`).join("")}</select></td>
+      <td>${a.tripped ? '<span class="f-tag down">limit dzienny zadziałał</span>' : ""}</td></tr>`).join("");
+    const bots = d.bots.map(b => `<tr><td><a href="#/bot/${b.id}">${esc(b.name)}</a></td><td>${esc(b.account)}</td>
+      <td>${levTag({ mode: b.mode, direction: b.direction, leverage: b.leverage })}</td><td>${statusPill(b.status)}</td></tr>`).join("");
+    const chip = (x, use) => `<span class="etf-chip ${x.ok === true ? "ok" : x.ok === false ? "bad" : ""} ${use && use[0] === x.etf ? "use" : ""}"
+        title="${esc(x.name || x.why || "jeszcze nie sprawdzony")}">${esc(x.etf)} <small>${x.lev > 0 ? "+" : ""}${num(x.lev, 1)}×</small></span>`;
+    const etf = d.etf.rows.map(r => `<tr><td class="mono"><a href="#/chart/${encodeURIComponent(r.base)}">${esc(r.base)}</a></td>
+      <td>${r.bull.map(x => chip(x, r.use_bull)).join(" ") || '<span class="muted small">—</span>'}</td>
+      <td>${r.bear.map(x => chip(x, r.use_bear)).join(" ") || '<span class="muted small">—</span>'}</td></tr>`).join("");
+    view.innerHTML = `<div class="page-head"><h1>Ryzyko</h1>
+        <p class="muted small" style="margin:4px 0 0">Wspólne zabezpieczenia wszystkich botów: wyłącznik, dzienny limit straty i zgoda na dźwignię.</p></div>
+      <div class="grid two">
+        <div class="card stack ${d.halt ? "halt-on" : ""}">
+          <h2>Wyłącznik ${d.halt ? '<span class="f-tag down">WŁĄCZONY</span>' : '<span class="f-tag up">boty pracują</span>'}</h2>
+          <p class="small" style="margin:0">${d.halt ? `Nowe wejścia wszystkich botów są wstrzymane${d.halt_reason ? ` (${esc(d.halt_reason)})` : ""}. Otwarte pozycje zostają ze swoimi stop-lossami.`
+            : "Jednym kliknięciem wstrzymasz otwieranie nowych pozycji przez wszystkie boty. Otwarte pozycje zostaną ze stopami."}</p>
+          <div class="acc-actions"><button class="btn ${d.halt ? "primary" : "danger"}" id="rk-halt">${d.halt ? "Zdejmij wyłącznik" : "Wstrzymaj nowe wejścia"}</button>
+            <button class="btn danger" id="rk-close" ${d.bots.length ? "" : "disabled"}>Zamknij pozycje z dźwignią</button></div>
+          <p class="small muted" style="margin:0">„Zamknij pozycje z dźwignią” sprzedaje / odkupuje po rynku wszystkie pozycje botów z dźwignią i grą na spadki,
+            a potem włącza wyłącznik. Wymaga hasła.</p>
+        </div>
+        <div class="card stack">
+          <h2>Dzienny limit straty</h2>
+          <p class="small" style="margin:0">Gdy kapitał konta spadnie dziś o więcej niż limit (wobec zamknięcia poprzedniego dnia), boty tego konta
+            do jutra nie otwierają nowych pozycji i dostajesz powiadomienie. Teraz: <b>${pct(d.daily_loss_pct)}</b>.</p>
+          <div class="seg" id="rk-dl">${[0, 0.02, 0.03, 0.05, 0.1].map(v => `<button data-v="${v}" class="${Math.abs((d.daily_loss_pct || 0) - v) < 1e-9 ? "on" : ""}">${v ? num(v * 100, 0) + "%" : "wyłączony"}</button>`).join("")}</div>
+          <label class="check small" style="padding:0"><input type="checkbox" id="rk-closelev" ${d.close_leveraged_on_limit ? "checked" : ""}>
+            Po przekroczeniu limitu zamknij też pozycje botów z dźwignią</label>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px"><h2>Konta i zgoda na dźwignię</h2>
+        <p class="small muted" style="margin:0 0 10px">Na koncie z prawdziwymi pieniędzmi bot z dźwignią albo grą na spadki nie wystartuje bez zgody (hasło i kod 2FA).
+          Limit dźwigni obcina ustawienie bota (domyślnie: akcje 2×, krypto 5×). Dźwignia brutto = wartość wszystkich pozycji / kapitał.</p>
+        <div class="table-wrap"><table><thead><tr><th>Konto</th><th>Rodzaj</th><th class="num">Kapitał</th><th class="num">Dźwignia brutto</th><th>Zgoda</th><th>Limit dźwigni</th><th></th></tr></thead>
+          <tbody>${accRows}</tbody></table></div></div>
+      <div class="card" style="margin-top:14px"><h2>Boty z dźwignią i grą na spadki</h2>
+        ${bots ? `<div class="table-wrap"><table><thead><tr><th>Bot</th><th>Konto</th><th>Tryb</th><th>Status</th></tr></thead><tbody>${bots}</tbody></table></div>`
+          : '<p class="muted small" style="margin:0">Brak. Włączysz to w ustawieniach bota: sekcja „Dźwignia i gra na spadki”.</p>'}</div>
+      <div class="card" style="margin-top:14px"><div class="card-head"><h2 style="margin:0">ETF-y lewarowane i odwrotne</h2>
+          <button class="btn small" id="rk-verify">Sprawdź dostępność u brokera</button></div>
+        <p class="small muted" style="margin:8px 0 10px">Sygnał liczony na spółce / indeksie, bot kupuje ETF z kolumny „wzrost” albo „spadek”.
+          Zielone = dostępne u brokera, czerwone = nie ma / nie w obrocie, obwódka = ten bot użyje.
+          ${d.etf.checked ? "Sprawdzono: " + when(new Date(d.etf.checked * 1000).toISOString()) + "." : "Jeszcze nie sprawdzono — kliknij przycisk."}
+          Własne pary dopiszesz w ustawieniach bota („Własne pary ETF”). GPW: tylko WIG20 (Beta ETF WIG20lev / WIG20short) przez IBKR.</p>
+        <div class="table-wrap"><table><thead><tr><th>Spółka / indeks</th><th>Na wzrost</th><th>Na spadek</th></tr></thead><tbody>${etf}</tbody></table></div></div>`;
+    $("#rk-halt").onclick = async () => {
+      const on = !d.halt;
+      const why = on ? prompt("Powód (opcjonalnie):", "") : "";
+      if (on && why === null) return;
+      try { await api("PUT", "/api/risk", { halt: on, halt_reason: why || "" }); toast(on ? "Wyłącznik włączony" : "Wyłącznik zdjęty"); draw(); } catch (e) { toast(e.message, true); }
+    };
+    $("#rk-close").onclick = async () => {
+      if (!confirm("Zamknąć PO RYNKU wszystkie pozycje botów z dźwignią i grą na spadki, i wstrzymać nowe wejścia?")) return;
+      const pw = prompt("Hasło do panelu:"); if (!pw) return;
+      let code = ""; try { if ((await api("GET", "/api/security")).totp) code = prompt("Kod 2FA:") || ""; } catch (e) { /* bez 2FA */ }
+      try { const r = await api("POST", "/api/risk/close-leveraged", { password: pw, code }); toast(`Zamknięto ${r.closed} pozycji`); draw(); } catch (e) { toast(e.message, true); }
+    };
+    $$("#rk-dl button").forEach(b => b.onclick = async () => { try { await api("PUT", "/api/risk", { daily_loss_pct: +b.dataset.v }); toast("Zapisano"); draw(); } catch (e) { toast(e.message, true); } });
+    $("#rk-closelev").onchange = async e => { try { await api("PUT", "/api/risk", { close_leveraged_on_limit: e.target.checked }); toast("Zapisano"); } catch (er) { toast(er.message, true); } };
+    $$("[data-consent]").forEach(cb => cb.onchange = async () => {
+      const name = cb.dataset.consent, on = cb.checked;
+      let body = { account: name, leverage_ok: on };
+      if (on) {
+        if (!confirm(`Konto „${name}” to PRAWDZIWE pieniądze. Zgoda pozwoli botom grać z dźwignią i na spadki — strata może przekroczyć wkład. Kontynuować?`)) { cb.checked = false; return; }
+        const pw = prompt("Hasło do panelu:"); if (!pw) { cb.checked = false; return; }
+        body.password = pw;
+        try { if ((await api("GET", "/api/security")).totp) body.code = prompt("Kod 2FA:") || ""; } catch (e) { /* bez 2FA */ }
+      }
+      try { await api("PUT", "/api/risk/account", body); toast("Zapisano"); draw(); } catch (e) { toast(e.message, true); cb.checked = !on; }
+    });
+    $$("[data-maxlev]").forEach(sel => sel.onchange = async () => {
+      try { await api("PUT", "/api/risk/account", { account: sel.dataset.maxlev, max_leverage: +sel.value }); toast("Zapisano"); } catch (e) { toast(e.message, true); } });
+    $("#rk-verify").onclick = async () => {
+      const b = $("#rk-verify"); b.disabled = true; b.textContent = "Sprawdzam… (ok. pół minuty)";
+      try { await api("POST", "/api/risk/verify-etfs"); toast("Sprawdzono"); draw(); } catch (e) { toast(e.message, true); b.disabled = false; b.textContent = "Sprawdź dostępność u brokera"; }
+    };
+  };
+  await draw();
+}
+
+// ------------------------------------------------------------------ KALENDARZ
+async function renderCalendar() {
+  let days = 30;
+  view.innerHTML = `<div class="page-head"><h1>Kalendarz</h1>
+      <p class="muted small" style="margin:4px 0 0">Raporty okresowe i dywidendy spółek, którymi handlują boty (dane z Yahoo Finance, odświeżane raz dziennie).</p></div>
+    <div class="card"><div class="seg" id="cal-days">${[7, 14, 30, 60].map(n => `<button data-d="${n}" class="${n === days ? "on" : ""}">${n} dni</button>`).join("")}</div>
+      <div id="cal-body" style="margin-top:12px"></div></div>`;
+  const KIND = { report: ["📅 Raport okresowy", "warn"], ex_div: ["💰 Odcięcie dywidendy", "info"], div_pay: ["Wypłata dywidendy", "muted"] };
+  const draw = async () => {
+    const d = await api("GET", `/api/calendar/upcoming?days=${days}`);
+    const st = d.status;
+    const rows = d.items.map(it => {
+      const [label, cls] = KIND[it.kind];
+      const blk = it.kind === "report" ? it.bots.filter(b => b.blackout && it.days <= b.blackout) : [];
+      const when = it.days === 0 ? "dziś" : it.days === 1 ? "jutro" : `za ${it.days} dni`;
+      return `<tr><td class="nowrap">${new Date(it.date + "T00:00:00").toLocaleDateString("pl-PL", { weekday: "short", day: "2-digit", month: "2-digit" })}
+          <div class="small muted">${when}</div></td>
+        <td><a class="mono" href="#/chart/${encodeURIComponent(it.symbol)}">${esc(it.symbol)}</a></td>
+        <td><span class="f-tag ${cls}">${label}</span></td>
+        <td class="small">${it.held_by.length ? `<b class="up">pozycja:</b> ${esc(it.held_by.join(", "))}` : ""}
+          ${it.bots.length ? `<div class="muted">${esc(it.bots.map(b => b.name).join(", "))}</div>` : ""}</td>
+        <td class="small">${it.kind !== "report" ? "" : blk.length ? `<span class="warn">zakupy wstrzymane (${esc(blk.map(b => b.name).join(", "))})</span>`
+          : it.bots.some(b => b.blackout) ? '<span class="muted">blokada zacznie się bliżej raportu</span>' : '<span class="muted">bez blokady</span>'}</td></tr>`;
+    }).join("");
+    $("#cal-body").innerHTML = (rows ? `<div class="table-wrap"><table><thead><tr><th>Data</th><th>Symbol</th><th>Wydarzenie</th><th>Boty</th><th>Blokada zakupów</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : `<p class="muted">${d.demo ? "W wersji demonstracyjnej kalendarz jest wyłączony." : "Brak wydarzeń w tym okresie (albo kalendarz jeszcze się wczytuje)."}</p>`)
+      + `<p class="small muted" style="margin:10px 0 0">Śledzone spółki: ${st.have} z ${st.symbols}${st.pending ? `, w kolejce do pobrania: ${st.pending}` : ""}${st.updated ? ` · ostatnia aktualizacja ${when(st.updated)}` : ""}.
+        Kalendarz pobiera się w tle (ok. 40 spółek na kwadrans), więc po pierwszym uruchomieniu lista uzupełnia się przez godzinę–dwie.
+        Blokadę zakupów przed raportem włączasz w ustawieniach bota: „Bez zakupów przed raportem (dni)”. ETF-y nie mają raportów.
+        Daty z Yahoo bywają szacunkowe (zakres dni), zanim spółka je potwierdzi.</p>`;
+  };
+  $$("#cal-days button").forEach(b => b.onclick = () => { days = +b.dataset.d; $$("#cal-days button").forEach(x => x.classList.toggle("on", x === b)); draw(); });
+  await draw();
 }
 
 // ------------------------------------------------------------------ RADAR: przeglad i spolki
@@ -2736,6 +2992,116 @@ async function renderRadarStocks(market) {
   };
   await draw();
   every(5000, async () => { if ($("#rs-scan")?.disabled) await draw().catch(() => {}); });
+}
+
+// ------------------------------------------------------------------ WYKRESY: dane finansowe i kalendarz
+let fundChart = null, chartMarks = null;
+const calCache = {};
+function eventMarks(ev, symbol) {
+  const M = chartMarks;
+  if (!M || M.symbol !== symbol || !ev) return;
+  const extra = [];
+  (ev.past_reports || []).forEach(dt => { const t = M.snap(dt + "T12:00:00Z"); if (t) extra.push({ time: t, position: "aboveBar", shape: "square", color: css("--info"), text: "R" }); });
+  (ev.past_ex_div || []).forEach(([dt]) => { const t = M.snap(dt + "T12:00:00Z"); if (t) extra.push({ time: t, position: "belowBar", shape: "square", color: "#b493ff", text: "D" }); });
+  if (!extra.length) return;
+  const all = [...M.marks, ...extra].sort((a, c) => a.time - c.time);
+  try { M.candles.setMarkers(all); } catch (e) { /* wykres juz zamkniety */ }
+}
+function eventsLine(ev) {
+  if (!ev) return "";
+  const days = dt => Math.round((new Date(dt + "T00:00:00") - new Date(new Date().toDateString())) / 864e5);
+  const fmtD = dt => new Date(dt + "T00:00:00").toLocaleDateString("pl-PL", { day: "numeric", month: "long", year: "numeric" });
+  const parts = [];
+  if (ev.earnings) { const n = days(ev.earnings);
+    parts.push(`<span class="ev-tag ${n <= 7 ? "warn" : ""}">📅 Raport: <b>${fmtD(ev.earnings)}</b>${ev.earnings_end && ev.earnings_end !== ev.earnings ? ` – ${fmtD(ev.earnings_end)}` : ""} (${n === 0 ? "dziś" : n === 1 ? "jutro" : "za " + n + " dni"})</span>`); }
+  if (ev.ex_div) parts.push(`<span class="ev-tag">💰 Odcięcie dywidendy: <b>${fmtD(ev.ex_div)}</b> (za ${days(ev.ex_div)} dni)${ev.div_pay ? `, wypłata ${fmtD(ev.div_pay)}` : ""}</span>`);
+  const past = (ev.past_reports || []).length;
+  return `<div class="ev-line">${parts.join("") || '<span class="ev-tag muted">Brak zapowiedzianej daty raportu ani dywidendy</span>'}
+    ${past || (ev.past_ex_div || []).length ? `<span class="small muted">Na wykresie: <b style="color:var(--info)">R</b> = dzień raportu, <b style="color:#b493ff">D</b> = odcięcie dywidendy.</span>` : ""}</div>`;
+}
+async function loadFund(d, refresh) {
+  const box = $("#ch-fund");
+  if (!box) return;
+  if (fundChart) { try { fundChart.destroy(); } catch (e) { /* juz usuniety */ } fundChart = null; }
+  if (chartState.fund === false) { box.innerHTML = ""; return; }
+  const last = d.bars[d.bars.length - 1][4], key = d.symbol;
+  const calP = (!refresh && calCache[key]) ? Promise.resolve(calCache[key])
+    : api("GET", `/api/calendar?symbol=${encodeURIComponent(key)}${refresh ? "&refresh=1" : ""}`).then(r => (calCache[key] = r.event)).catch(() => null);
+  calP.then(ev => eventMarks(ev, key));
+  let F = !refresh && fundCache[key];
+  if (!F) {
+    box.innerHTML = `<div class="card fund-card" style="margin-top:14px"><h2>Finanse</h2><p class="muted small">Pobieram dane finansowe ${esc(key)}…</p></div>`;
+    try { F = await api("GET", `/api/fundamentals?symbol=${encodeURIComponent(key)}&price=${last}${refresh ? "&refresh=1" : ""}`); }
+    catch (e) { F = { error: e.message }; }
+    fundCache[key] = F;
+  }
+  if (!$("#ch-fund") || chartState.fund === false) return;
+  const ev = await calP;
+  if (!$("#ch-fund") || chartState.fund === false) return;
+  $("#ch-fund").innerHTML = fundCard(F, ev);
+  const rb = $("#fund-refresh"); if (rb) rb.onclick = () => loadFund(d, true);
+  const cv = $("#fund-q");
+  if (cv && F.quarters) {
+    const grid = css("--line"), muted = css("--muted");
+    fundChart = new Chart(cv, {
+      type: "bar",
+      data: { labels: F.quarters.periods, datasets: [
+        { label: "Przychody", data: F.quarters.revenue, backgroundColor: css("--info"), borderRadius: 3, maxBarThickness: 30 },
+        { label: "Zysk netto", data: F.quarters.net_income, backgroundColor: F.quarters.net_income.map(v => v < 0 ? css("--down") : css("--up")), borderRadius: 3, maxBarThickness: 30 }] },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { labels: { color: muted, boxWidth: 12 } },
+          tooltip: { callbacks: { label: it => ` ${it.dataset.label}: ${big(it.raw, F.currency)}` } } },
+        scales: { x: { grid: { color: grid }, ticks: { color: muted } },
+          y: { grid: { color: grid }, ticks: { color: muted, callback: v => big(v) } } } },
+    });
+  }
+}
+function big(v, cur) {
+  if (v == null || isNaN(v)) return "—";
+  const a = Math.abs(v), sgn = v < 0 ? "−" : "";
+  const [d, u] = a >= 1e12 ? [1e12, " bln"] : a >= 1e9 ? [1e9, " mld"] : a >= 1e6 ? [1e6, " mln"] : a >= 1e4 ? [1e3, " tys."] : [1, ""];
+  const n = new Intl.NumberFormat("pl-PL", { maximumFractionDigits: d === 1 ? 2 : a / d >= 100 ? 0 : a / d >= 10 ? 1 : 2 }).format(a / d);
+  return sgn + n + u + (cur ? " " + cur : "");
+}
+function fundVal(v, fmt, cur) {
+  if (v == null || isNaN(v)) return "—";
+  if (fmt === "money") return big(v, cur);
+  if (fmt === "pct") return pct(v, 1, false);
+  if (fmt === "x") return num(v, v >= 100 ? 0 : 1) + "×";
+  if (fmt === "eps") return num(v, 2) + " " + (cur || "");
+  if (fmt === "count") return big(v);
+  if (fmt === "rank") return "#" + num(v, 0);
+  if (fmt === "price") return price(v) + " " + (cur || "");
+  return num(v);
+}
+function fundCard(F, ev) {
+  if (!F) return "";
+  if (F.error) return `<div class="card" style="margin-top:14px"><h2>Finanse</h2>${eventsLine(ev)}<p class="muted small" style="margin:0">${esc(F.error)}</p></div>`;
+  const cur = F.currency;
+  const tiles = (F.valuation || []).map(v => `<div class="metric" title="${esc(v.hint || "")}"><div class="label">${esc(v.label)}</div>
+    <div class="value ${v.label === "Od rekordu" || v.label.startsWith("Zmiana") ? tone(v.value) : ""}">${fundVal(v.value, v.fmt, cur)}</div></div>`).join("");
+  let table = "";
+  if (F.annual && F.annual.years.length) {
+    const Y = F.annual.years;
+    const yoy = r => { const a = r.values[r.values.length - 2], b = r.values[r.values.length - 1];
+      return r.fmt === "money" && a && b != null && a > 0 ? (b / a - 1) * 100 : null; };
+    table = `<div class="table-wrap fund-table"><table><thead><tr><th>Rok obrotowy</th>${Y.map(y => `<th class="num">${esc(y)}</th>`).join("")}<th class="num">r/r</th></tr></thead>
+      <tbody>${F.annual.rows.map(r => { const g = yoy(r); return `<tr><td>${esc(r.label)}</td>${r.values.map(v => `<td class="num mono ${r.key === "net_income" || r.key === "fcf" ? (v < 0 ? "down" : "") : ""}">${fundVal(v, r.fmt, "")}</td>`).join("")}
+        <td class="num small ${tone(g)}">${g == null ? "" : pct(g, 0)}</td></tr>`; }).join("")}</tbody></table></div>
+      <p class="muted small" style="margin:6px 0 0">Kwoty w ${esc(cur)}. Rok obrotowy oznaczony rokiem, w którym się kończy.</p>`;
+  }
+  const lr = F.last_report;
+  return `<div class="card fund-card" style="margin-top:14px">
+    <div class="card-head"><div><h2 style="margin:0">Finanse: ${esc(F.name || F.symbol)}</h2>
+      ${F.sector ? `<div class="small muted">${esc(F.sector)}${F.employees ? ` · ${num(F.employees, 0)} pracowników` : ""}</div>` : ""}</div>
+      <button class="btn small ghost" id="fund-refresh" type="button" title="Pobierz dane ponownie (zwykle odświeżają się same co 12 h)">Odśwież</button></div>
+    ${F.kind !== "crypto" ? eventsLine(ev) : ""}
+    ${tiles ? `<div class="grid metrics fund-metrics">${tiles}</div>` : ""}
+    ${F.quarters && F.quarters.periods.length ? `<h3 class="fund-h">Ostatnie kwartały</h3><div class="fund-q"><canvas id="fund-q"></canvas></div>` : ""}
+    ${table ? `<h3 class="fund-h">Wyniki roczne</h3>${table}` : ""}
+    ${F.about ? `<details style="margin-top:10px"><summary class="small">O ${F.kind === "crypto" ? "projekcie" : F.kind === "fund" ? "funduszu" : "spółce"}</summary><p class="small muted">${esc(F.about)}${F.about.length >= 600 ? "…" : ""}</p></details>` : ""}
+    <p class="muted small" style="margin:10px 0 0">Źródło: <a href="${esc(F.source_url)}" target="_blank" rel="noopener noreferrer">${esc(F.source)}</a>${lr && lr.period ? ` · ostatni raport za okres do ${esc(lr.period)}${lr.form ? ` (${esc(lr.form)}${lr.filed ? `, złożony ${esc(lr.filed)}` : ""})` : ""}` : ""}.
+      ${F.kind === "stock" ? "Wskaźniki zależne od ceny liczone dla ostatniej ceny z wykresu. Dane z publicznych raportów mogą mieć opóźnienie albo braki" : "Dane z chwili pobrania (odświeżają się co 12 h)"} — to tło do decyzji, nie rekomendacja.</p></div>`;
 }
 
 function planCard(P) {
@@ -2829,4 +3195,159 @@ function filterPatterns(P) {
   X.text = { bull: "Przewaga sygnałów wzrostowych.", bear: "Przewaga sygnałów spadkowych.", neutral: "Sygnały mieszane — brak wyraźnej przewagi." }[X.bias]
     + (X.levels.length && P.summary.near ? " " + P.summary.near : "");
   return X;
+}
+
+
+// ------------------------------------------------------------------ SIATKA / USREDNIANIE (karta na stronie bota)
+function specialCard(b) {
+  const p = b.params, rows = b.special || [];
+  if (!rows.length) return `<div class="card" style="margin-bottom:14px"><h2>${b.strategy === "grid" ? "Siatka" : "Uśrednianie"}</h2>
+    <div class="empty">Stan pojawi się po pierwszym cyklu bota (po starcie).</div></div>`;
+  if (b.strategy === "grid") {
+    return `<div class="card" style="margin-bottom:14px"><div class="card-head"><h2>Siatka</h2>
+      <span class="muted small">${p.grid_levels} poziomów · ±${num(p.grid_range_pct * 100, 0)}% · stop ${p.grid_stop_pct ? num(p.grid_stop_pct * 100, 0) + "% pod siatką" : "wyłączony"}</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Symbol</th><th class="num">Dół</th><th class="num">Góra</th><th class="num">Krok</th>
+        <th>Zajęte poziomy</th><th class="num">Porcja</th><th class="num">Zysk siatki</th></tr></thead><tbody>
+      ${rows.map(r => { const L = r.levels, n = L.length;
+        const bar = L.slice(0, -1).map((_, i) => `<span title="poziom ${i + 1}: ${price(L[i])}" style="display:inline-block;width:8px;height:14px;margin-right:2px;border-radius:2px;background:${r.held.includes(i) ? "var(--up)" : "var(--panel-2)"}"></span>`).join("");
+        return `<tr><td><b>${esc(r.symbol)}</b>${r.stopped ? ` <span class="f-tag down">stop</span>` : ""}</td>
+          <td class="num">${price(L[0])}</td><td class="num">${price(L[n - 1])}</td><td class="num">${pct((L[1] / L[0] - 1) * 100, 2, false)}</td>
+          <td>${bar} <span class="muted small">${r.held.length}/${n - 1}</span></td><td class="num">${usd(r.slot_value)}</td>
+          <td class="num ${tone(r.realized)}">${usd(r.realized, true)}</td></tr>`; }).join("")}</tbody></table></div>
+      <p class="muted small" style="margin-top:8px">Zielone = kupiona porcja, czeka na sprzedaż poziom wyżej. Bot nie stawia zleceń na serwerze — pilnuje cen co cykl.</p></div>`;
+  }
+  return `<div class="card" style="margin-bottom:14px"><div class="card-head"><h2>Uśrednianie</h2>
+    <span class="muted small">${p.dca_mode === "regular" ? `zakup co ${p.dca_every_hours} h` : `dokupienie co ${num(p.dca_step_pct * 100, 1)}% spadku · ×${num(p.dca_mult, 2)} · maks. ${p.dca_max_safety}`}
+    · sprzedaż ${p.dca_tp_pct ? `+${num(p.dca_tp_pct * 100, 1)}% nad średnią` : "—"}</span></div>
+    <div class="table-wrap"><table><thead><tr><th>Symbol</th><th class="num">Ilość</th><th class="num">Średnia</th><th class="num">Wydane</th>
+      <th class="num">Dokupienia</th><th class="num">${p.dca_mode === "regular" ? "Następny zakup" : "Następne dokupienie"}</th><th class="num">Rundy</th><th class="num">Zysk</th></tr></thead><tbody>
+    ${rows.map(r => `<tr><td><b>${esc(r.symbol)}</b></td><td class="num">${num(r.qty, 6)}</td><td class="num">${r.qty ? price(r.avg) : "—"}</td>
+      <td class="num">${usd(r.spent)}</td><td class="num">${r.n_safety}</td>
+      <td class="num">${p.dca_mode === "regular" ? (r.next_t ? when(new Date(r.next_t * 1000).toISOString()) : "—") : (r.next_buy ? price(r.next_buy) : "—")}</td>
+      <td class="num">${r.rounds}</td><td class="num ${tone(r.realized)}">${usd(r.realized, true)}</td></tr>`).join("")}</tbody></table></div></div>`;
+}
+
+// ------------------------------------------------------------------ ALERTY TRADINGVIEW (karta na stronie bota)
+async function drawTv(id) {
+  const box = $("#tv-box");
+  const d = await api("GET", `/api/bots/${id}/tv`);
+  const msg = `{"symbol": "{{ticker}}", "action": "{{strategy.order.action}}", "price": {{close}}${d.passphrase ? ', "passphrase": "TWOJE_HASLO"' : ""}}`;
+  const ST = { new: ["czeka", "info"], done: ["wykonany", "up"], expired: ["za stary", "muted"], rejected: ["odrzucony", "down"] };
+  box.innerHTML = `<div class="card-head"><h2>Alerty z TradingView</h2><button class="btn ghost small" id="tv-rot">Nowy adres</button></div>
+    <div class="grid two">
+      <div class="stack">
+        <div class="field"><label>Adres webhooka (wklej w TradingView → Alert → Powiadomienia → Webhook URL)</label>
+          ${d.url ? `<div style="display:flex;gap:6px"><input readonly class="mono" id="tv-url" value="${esc(d.url)}" style="flex:1"><button class="btn small" data-copy="tv-url">Kopiuj</button></div>`
+            : `<p class="note warn">Brak publicznego adresu. Odbiornik działa na porcie <b>${d.port}</b>, ścieżka <span class="mono">/tv/${esc(d.token)}</span>.
+               TradingView musi go widzieć z internetu — najprościej Tailscale Funnel (<span class="mono">tailscale funnel --bg ${d.port}</span>),
+               potem wpisz adres w <span class="mono">.env</span> jako <span class="mono">TV_WEBHOOK_URL=https://…ts.net</span> i zrestartuj. Instrukcja w README.</p>`}
+          <div class="help">Adres to hasło: kto go zna, może wysłać alert. Nie publikuj go. „Nowy adres” unieważnia stary.</div></div>
+        <div class="field"><label>Treść alertu (Message)</label>
+          <div style="display:flex;gap:6px"><input readonly class="mono" id="tv-msg" value="${esc(msg)}" style="flex:1"><button class="btn small" data-copy="tv-msg">Kopiuj</button></div>
+          <div class="help">W alertach ze wskaźnika zamiast <span class="mono">{{strategy.order.action}}</span> wpisz <span class="mono">buy</span> albo <span class="mono">sell</span>.
+            Akcje: buy, sell, short, cover, close. Symbole bota: ${esc(d.symbols.join(", "))}.</div></div>
+      </div>
+      <div><div class="muted small" style="margin-bottom:6px">Ostatnie alerty</div>
+        ${!d.alerts.length ? `<div class="empty">Jeszcze nic nie przyszło.</div>` : `<div class="table-wrap" style="max-height:260px;overflow:auto"><table><thead><tr><th>Czas</th><th>Symbol</th><th>Akcja</th><th class="num">Cena</th><th>Status</th></tr></thead><tbody>
+        ${d.alerts.map(a => { const [t, c] = ST[a.status] || [a.status, "muted"];
+          return `<tr><td class="small">${when(a.ts)}</td><td><b>${esc(a.symbol)}</b></td><td>${esc(a.action)}</td><td class="num">${a.price == null ? "—" : price(a.price)}</td>
+            <td><span class="f-tag ${c}">${t}</span>${a.note ? `<div class="small muted">${esc(a.note)}</div>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`}</div>
+    </div>`;
+  $$("[data-copy]", box).forEach(b => b.onclick = async () => {
+    const el = $("#" + b.dataset.copy); el.select();
+    try { await navigator.clipboard.writeText(el.value); } catch { document.execCommand("copy"); }
+    toast("Skopiowano");
+  });
+  $("#tv-rot").onclick = async () => {
+    if (!confirmBox("Utworzyć nowy adres? Stary przestanie działać — trzeba będzie podmienić go w alertach TradingView.")) return;
+    try { await api("POST", `/api/bots/${id}/tv/rotate`); toast("Nowy adres gotowy"); drawTv(id); } catch (e) { toast(e.message, true); }
+  };
+}
+
+// ------------------------------------------------------------------ GALERIA STRATEGII + STRATEGIA Z OPISU (AI)
+const RISK_TONE = { "niskie": "up", "średnie": "warn", "wysokie": "down", "bardzo wysokie": "down" };
+function accountFor(source, market) {
+  const want = { ibkr: "ibkr", kraken: "kraken", alpaca: "alpaca" }[source];
+  return (SCHEMA.accounts.find(a => a.type === want) || SCHEMA.accounts.find(a => market === "crypto" ? ["kraken", "gielda", "alpaca", "sim"].includes(a.type) : a.type !== "kraken" && a.type !== "gielda") || SCHEMA.accounts[0])?.name;
+}
+function presetBacktest(it) {
+  sessionStorage.setItem("bt_preset", JSON.stringify({ market: it.market, strategy: it.strategy, params: it.params, name: it.name,
+    start: it.start, end: it.end, data_source: it.data_source }));
+  location.hash = "#/backtests";
+}
+function presetBot(it) {
+  botForm(null, { name: it.name, account: accountFor(it.data_source, it.market), market: it.market, strategy: it.strategy, params: it.params });
+}
+function galleryCard(it) {
+  const r = it.results;
+  return `<div class="card gal-card">
+    <div class="card-head" style="align-items:flex-start"><div><div class="muted small">${esc(it.category)}</div><h2 style="margin-top:2px">${esc(it.name)}</h2></div>
+      <span class="f-tag ${RISK_TONE[it.risk] || "muted"}" title="ryzyko" style="flex-shrink:0">ryzyko: ${esc(it.risk)}</span></div>
+    <p class="small" style="margin:6px 0 10px">${esc(it.description)}</p>
+    ${r ? `<div class="grid metrics gal-metrics">
+        ${metric("Zwrot", pct(r.total), tone(r.total))}${metric("Rocznie", pct(r.cagr), tone(r.cagr))}
+        ${metric("Max obsunięcie", pct(r.dd), "down")}${metric("Kup i trzymaj", r.bench == null ? "—" : pct(r.bench), tone(r.bench))}</div>
+        ${r.curve ? `<div style="position:relative;height:46px;margin-top:10px" title="kapitał w czasie">${spark(r.curve, 400, 46)}</div>` : ""}
+        <div class="muted small" style="margin-top:6px">Backtest ${esc(r.from)} → ${esc(r.to)}${it.strategy === "dca" ? "" : ` · ${r.trades} transakcji · skuteczność ${r.win == null ? "—" : pct(r.win, 0, false)}`}
+          · Sharpe ${r.sharpe == null ? "—" : num(r.sharpe, 2)} · dane: ${esc(r.source || it.data_source)}, z kosztami transakcji</div>`
+      : `<p class="note">Wyniki backtestu w przygotowaniu — kliknij „Backtest na moich danych”, żeby policzyć je od razu.</p>`}
+    <div class="muted small" style="margin-top:8px">${MARKET[it.market]} · ${esc(it.strategy_name)} · ${esc(it.params.timeframe)} · ${it.params.symbols.length} symb. · wymaga: ${esc(it.needs)}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      <button class="btn small" data-gbt="${esc(it.id)}">Backtest na moich danych</button>
+      <button class="btn primary small" data-gbot="${esc(it.id)}">Utwórz bota</button></div>
+  </div>`;
+}
+async function renderGallery() {
+  const [g, ai] = await Promise.all([api("GET", "/api/gallery"), api("GET", "/api/ai/status")]);
+  const cats = [...new Set(g.items.map(x => x.category))];
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Galeria strategii</h1>
+      <div class="muted small" style="margin-top:4px">Gotowe ustawienia z wynikami testów na prawdziwych danych historycznych, z kosztami transakcji${g.computed ? ` (policzone ${esc(g.computed)})` : ""}.
+        W silnej hossie 2021–2026 większość strategii zarobiła mniej niż samo trzymanie indeksu („Kup i trzymaj”) — ich zaletą jest zwykle mniejsze obsunięcie i czas poza rynkiem.
+        Wyniki z przeszłości nie gwarantują przyszłych — zacznij od konta na papierze.</div></div></div>
+    <div class="card" style="margin-bottom:14px"><div class="card-head"><h2>Opisz strategię słowami</h2>
+      <span class="muted small">${ai.enabled ? `AI: ${esc(ai.model)}` : "wymaga klucza API Claude"}</span></div>
+      ${ai.enabled ? `<form class="form" id="ai-form">
+        <textarea id="ai-text" rows="3" maxlength="3000" placeholder="Np. Kupuj duże spółki z WIG20, gdy kurs przebije maksimum z 50 dni i RSI jest poniżej 70, ale tylko gdy WIG20 jest nad średnią 200 dni. Stop 8%, zysk 20%."></textarea>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select id="ai-market" style="width:auto"><option value="">rynek: dowolny</option><option value="stocks">akcje / ETF</option><option value="crypto">krypto</option></select>
+          <select id="ai-account" style="width:auto">${SCHEMA.accounts.map(a => `<option value="${esc(a.name)}">konto ${esc(a.name)} (${esc(accDesc(a))})</option>`).join("")}</select>
+          <button class="btn primary" type="submit" id="ai-go">Zamień na ustawienia</button>
+          <span class="muted small">Nic się nie uruchomi samo — najpierw zobaczysz wynik.</span></div>
+      </form><div id="ai-out"></div>`
+      : `<p class="note">Dopisz do pliku <span class="mono">.env</span> własny klucz <span class="mono">ANTHROPIC_API_KEY=…</span> (console.anthropic.com, płatny za użycie —
+         jedno tłumaczenie to ułamek centa) i zrestartuj aplikację. Wtedy wystarczy opisać strategię zwykłym zdaniem, a panel ułoży z niej bota.</p>`}
+    </div>
+    ${cats.map(c => `<h2 style="margin:18px 0 10px">${esc(c)}</h2>
+      <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr))">${g.items.filter(x => x.category === c).map(galleryCard).join("")}</div>`).join("")}`;
+  const byId = Object.fromEntries(g.items.map(x => [x.id, x]));
+  $$("[data-gbt]").forEach(b => b.onclick = () => presetBacktest(byId[b.dataset.gbt]));
+  $$("[data-gbot]").forEach(b => b.onclick = () => presetBot(byId[b.dataset.gbot]));
+  const form = $("#ai-form");
+  if (form) form.onsubmit = async e => {
+    e.preventDefault();
+    const out = $("#ai-out"), btn = $("#ai-go");
+    btn.disabled = true; btn.textContent = "Myślę…";
+    out.innerHTML = `<div class="empty">Tłumaczę opis na ustawienia (do ok. 30 s)…</div>`;
+    try {
+      const r = await api("POST", "/api/ai/strategy", { text: $("#ai-text").value, market: $("#ai-market").value || null, account: $("#ai-account").value });
+      const p = r.params, strat = SCHEMA.strategies.find(s => s.key === r.strategy);
+      out.innerHTML = `<div class="card" style="margin-top:12px;background:var(--panel-2)">
+        <div class="card-head"><h2>${esc(r.name || "Strategia")}</h2><span class="muted small">${MARKET[r.market]} · ${esc(strat?.name || r.strategy)} · ${esc(p.timeframe)}</span></div>
+        <p>${esc(r.explanation || "")}</p>
+        ${r.strategy === "rules" ? `<p class="note">${esc(rulesSummary(p))}</p>` : ""}
+        <div class="muted small" style="margin:8px 0">Symbole: ${esc(p.symbols.join(", "))} · budżet ${pct(p.allocation_pct * 100, 0, false)}
+          ${["grid", "dca"].includes(r.strategy) ? "" : `· SL ${pct(p.stop_loss_pct * 100, 1, false)} · TP ${pct(p.take_profit_pct * 100, 1, false)}`}
+          ${p.leverage_mode && p.leverage_mode !== "off" ? levTag({ mode: p.leverage_mode, direction: p.direction, leverage: p.leverage }) : ""}</div>
+        ${r.assumptions.length ? `<div class="small"><b>Założenia:</b><ul style="margin:4px 0 8px 18px">${r.assumptions.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
+        ${r.warnings.length ? `<div class="note warn"><b>Uwagi:</b> ${r.warnings.map(esc).join(" · ")}</div>` : ""}
+        ${r.errors?.length ? `<p class="err">Panel nie przyjął ustawień: ${esc(r.errors.join("; "))}. Spróbuj opisać inaczej.</p>` : `
+        <div style="display:flex;gap:8px;margin-top:12px"><button class="btn" id="ai-bt">Backtest</button>
+          <button class="btn primary" id="ai-bot">Utwórz bota (do sprawdzenia)</button></div>`}</div>`;
+      const it = { name: r.name || "Strategia AI", market: r.market, strategy: r.strategy, params: p, data_source: null };
+      $("#ai-bt") && ($("#ai-bt").onclick = () => presetBacktest(it));
+      $("#ai-bot") && ($("#ai-bot").onclick = () => botForm(null, { ...it, account: $("#ai-account").value }));
+    } catch (err) { out.innerHTML = `<p class="err">${esc(err.message)}</p>`; }
+    finally { btn.disabled = false; btn.textContent = "Zamień na ustawienia"; }
+  };
 }

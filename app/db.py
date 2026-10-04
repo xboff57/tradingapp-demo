@@ -121,6 +121,24 @@ CREATE TABLE IF NOT EXISTS backtests (
     result      TEXT,
     error       TEXT
 );
+CREATE TABLE IF NOT EXISTS bot_state (
+    bot_id    INTEGER NOT NULL,
+    symbol    TEXT NOT NULL,
+    data      TEXT NOT NULL,
+    PRIMARY KEY (bot_id, symbol)
+);
+CREATE TABLE IF NOT EXISTS tv_alerts (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id    INTEGER NOT NULL,
+    ts        TEXT NOT NULL,
+    symbol    TEXT NOT NULL,
+    action    TEXT NOT NULL,
+    price     REAL,
+    raw       TEXT,
+    status    TEXT NOT NULL DEFAULT 'new',
+    note      TEXT
+);
+CREATE INDEX IF NOT EXISTS tv_alerts_bot ON tv_alerts(bot_id, id);
 """
 
 
@@ -142,6 +160,10 @@ class DB:
             pcols = {r[1] for r in self.conn.execute("PRAGMA table_info(positions_state)")}
             if "peak" not in pcols:
                 self.conn.execute("ALTER TABLE positions_state ADD COLUMN peak REAL")
+            if "side" not in pcols:                     # 'long' / 'short' (gra na spadek)
+                self.conn.execute("ALTER TABLE positions_state ADD COLUMN side TEXT DEFAULT 'long'")
+            if "meta" not in pcols:                     # np. spolka bazowa dla ETF-u lewarowanego
+                self.conn.execute("ALTER TABLE positions_state ADD COLUMN meta TEXT")
             cols = {r[1] for r in self.conn.execute("PRAGMA table_info(backtests)")}
             for col, typ in (("opt_status", "TEXT"), ("opt_progress", "REAL"), ("opt_result", "TEXT"),
                              ("opt_error", "TEXT")):
@@ -190,7 +212,7 @@ class DB:
         self.execute(f"UPDATE bots SET {cols} WHERE id=?", (*fields.values(), bot_id))
 
     def delete_bot(self, bot_id):
-        for table in ("bots", "trades", "positions_state", "logs", "ml_models"):
+        for table in ("bots", "trades", "positions_state", "logs", "ml_models", "bot_state", "tv_alerts"):
             col = "id" if table == "bots" else "bot_id"
             self.execute(f"DELETE FROM {table} WHERE {col}=?", (bot_id,))
         self.execute("DELETE FROM equity WHERE scope='bot' AND ref=?", (str(bot_id),))
@@ -223,15 +245,30 @@ class DB:
     def pos_states(self, bot_id):
         return {r["symbol"]: r for r in self.all("SELECT * FROM positions_state WHERE bot_id=?", (bot_id,))}
 
-    def set_pos_state(self, bot_id, symbol, entry, qty, sl, tp):
+    def set_pos_state(self, bot_id, symbol, entry, qty, sl, tp, side="long", meta=None):
         self.execute(
-            "INSERT OR REPLACE INTO positions_state(bot_id, symbol, entry, qty, sl, tp, opened_at) "
-            "VALUES (?,?,?,?,?,?,COALESCE((SELECT opened_at FROM positions_state "
+            "INSERT OR REPLACE INTO positions_state(bot_id, symbol, entry, qty, sl, tp, side, meta, opened_at) "
+            "VALUES (?,?,?,?,?,?,?,?,COALESCE((SELECT opened_at FROM positions_state "
             "WHERE bot_id=? AND symbol=?), ?))",
-            (bot_id, symbol, entry, qty, sl, tp, bot_id, symbol, now_iso()))
+            (bot_id, symbol, entry, qty, sl, tp, side, meta, bot_id, symbol, now_iso()))
 
     def set_peak(self, bot_id, symbol, peak):
         self.execute("UPDATE positions_state SET peak=? WHERE bot_id=? AND symbol=?", (peak, bot_id, symbol))
+
+    # ------------------------------------------------------------ stan botow specjalnych (siatka, DCA)
+    def get_state(self, bot_id, symbol):
+        r = self.one("SELECT data FROM bot_state WHERE bot_id=? AND symbol=?", (bot_id, symbol))
+        return json.loads(r["data"]) if r else None
+
+    def set_state(self, bot_id, symbol, data):
+        self.execute("INSERT OR REPLACE INTO bot_state(bot_id, symbol, data) VALUES (?,?,?)",
+                     (bot_id, symbol, json.dumps(data)))
+
+    def del_state(self, bot_id, symbol=None):
+        if symbol is None:
+            self.execute("DELETE FROM bot_state WHERE bot_id=?", (bot_id,))
+        else:
+            self.execute("DELETE FROM bot_state WHERE bot_id=? AND symbol=?", (bot_id, symbol))
 
     def del_pos_state(self, bot_id, symbol):
         self.execute("DELETE FROM positions_state WHERE bot_id=? AND symbol=?", (bot_id, symbol))

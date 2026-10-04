@@ -33,9 +33,10 @@ EVENTS = {
     "lab": "Laboratorium i nowe modele ML",
     "system": "Start aplikacji, aktualizacje, restart przez strażnika",
     "signals": "Okazje do ręcznego kopiowania — kupno i sprzedaż z ceną, stop-lossem i kwotą dla Ciebie",
+    "calendar": "Kalendarz: jutro raport albo odcięcie dywidendy spółki, którą trzyma bot",
 }
 DEFAULT_EVENTS = {"errors": True, "sells": True, "buys": False, "reports": True, "lab": True, "system": True,
-                  "signals": True}
+                  "signals": True, "calendar": True}
 
 _q = queue.Queue(maxsize=500)
 _last = {}

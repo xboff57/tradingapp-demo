@@ -1,0 +1,24 @@
+﻿Gotowe! Co dalej (5 minut):
+
+1. Panel otworzy się w przeglądarce: http://127.0.0.1:8420
+   Przy pierwszym uruchomieniu ustawiasz login i hasło do panelu (min. 10 znaków).
+   Zapisz je w menedżerze haseł.
+
+2. Konta → dodaj darmowe konto „Alpaca Paper” (akcje USA na niby) albo „Kraken” w trybie
+   na niby (krypto). Na początek wystarczy też wbudowane konto „demo” (symulacja).
+
+3. Galeria strategii → wybierz strategię → „Backtest na moich danych” → „Utwórz bota” → Start.
+
+4. System → Powiadomienia: transakcje i problemy na telefon (aplikacja ntfy albo Telegram).
+
+5. Logowanie → włącz kod z aplikacji (2FA).
+
+Menu Start → TradingApp:
+  • TradingApp — uruchom / otwórz panel
+  • Zatrzymaj TradingApp — wyłącza aplikację i boty (pozycje u brokera zostają ze stop-lossami)
+  • TradingApp — wersja demo — przykładowe dane, do obejrzenia funkcji
+  • Folder danych i ustawień — baza, logi, plik .env
+  • Instrukcja — pełny opis krok po kroku
+
+Aktualizacja: pobierz nowszy instalator z github.com/xboff57/tradingapp-demo/releases
+i uruchom go — boty, konta i historia zostają.

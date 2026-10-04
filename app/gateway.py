@@ -10,6 +10,9 @@ Podział ról (aplikacja NIE ma dostępu do Dockera):
 Automatyczny restart: gdy bramka nie ma połączenia z IBKR (albo aplikacja z bramką) dłużej niż ustalony czas.
 Bez restartów w nocnym oknie bramki (23:45–00:15, sama się wtedy restartuje), najwyżej raz na 30 minut
 i najwyżej 4 razy na 6 godzin — dalej tylko powiadomienie.
+W weekend (pt 23:00 – pn 06:00) giełdy są zamknięte, a IBKR prowadzi prace na serwerach: wtedy bez restartów
+i bez powiadomień (tylko wpis w historii). Jeśli w poniedziałek o 6:00 połączenia nadal nie ma — zwykły restart,
+żeby bramka była gotowa przed sesją.
 """
 
 import json
@@ -34,7 +37,7 @@ LOGS = os.path.join(DIR, "logs.txt")
 SETTINGS = os.path.join(DIR, "settings.json")
 EVENTS = os.path.join(DIR, "events.json")
 ACTIONS = ("restart", "stop", "start")
-DEFAULTS = {"auto_restart": True, "threshold_min": 15}
+DEFAULTS = {"auto_restart": True, "threshold_min": 15, "weekend_pause": True}
 PL = ZoneInfo("Europe/Warsaw")
 _lock = threading.Lock()
 os.makedirs(DIR, exist_ok=True)
@@ -69,11 +72,18 @@ def settings():
     return s
 
 
-def save_settings(auto_restart, threshold_min):
+def save_settings(auto_restart, threshold_min, weekend_pause=True):
     t = int(threshold_min)
     if not 5 <= t <= 240:
         raise ValueError("Czas: od 5 do 240 minut.")
-    _write(SETTINGS, {"auto_restart": bool(auto_restart), "threshold_min": t})
+    _write(SETTINGS, {"auto_restart": bool(auto_restart), "threshold_min": t, "weekend_pause": bool(weekend_pause)})
+
+
+def weekend(now=None):
+    """Weekend giełdowy: od piątku 23:00 do poniedziałku 6:00 (czas polski)."""
+    t = now or datetime.now(PL)
+    wd, h = t.weekday(), t.hour
+    return (wd == 4 and h >= 23) or wd in (5, 6) or (wd == 0 and h < 6)
 
 
 def events(limit=30):
@@ -125,8 +135,10 @@ def state():
             logs = mask(f.read()[-20000:])
     except OSError:
         logs = ""
+    s = settings()
     return {"container": st, "updater_ok": age is not None and age < 180, "updater_age": age,
-            "connections": conns, "settings": settings(), "events": events(),
+            "weekend": bool(s.get("weekend_pause") and weekend()),
+            "connections": conns, "settings": s, "events": events(),
             "pending": _read(CMD), "result": _read(RESULT), "logs": logs, "now": time.time()}
 
 
@@ -136,6 +148,7 @@ class Monitor:
         self.alerted = False
         self.restarts = []            # czasy automatycznych restartow
         self.grace_until = 0
+        self.weekend_noted = False
 
     def night(self):
         t = datetime.now(PL)
@@ -180,6 +193,13 @@ class Monitor:
                 notify.send("Bramka IBKR: połączenie wróciło.", "errors")
             return
         down, why = worst
+        if s.get("weekend_pause", True) and weekend():
+            if not self.weekend_noted:                    # weekend: giełdy zamknięte - bez restartów i bez powiadomień
+                self.weekend_noted = True
+                event("info", why[0].upper() + why[1:] + " — weekend, giełdy zamknięte: bez restartu i powiadomień "
+                      "do poniedziałku 6:00.")
+            return
+        self.weekend_noted = False
         if down < limit or now < self.grace_until:
             return
         if not self.alerted:

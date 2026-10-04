@@ -41,6 +41,11 @@ COMMON_PARAMS = [
      "help": "Bot kupuje akcje za wyliczoną kwotę, nawet gdy nie starcza na całą akcję (np. 100 $ akcji po 300 $). "
              "Tylko Alpaca (akcje i ETF-y z USA, które Alpaca dopuszcza do ułamków). Stop-loss i take-profit "
              "pilnuje wtedy bot co cykl. GPW i IBKR nie obsługują ułamków."},
+    {"key": "earnings_blackout_days", "label": "Bez zakupów przed raportem (dni)", "type": "int", "min": 0, "max": 14,
+     "market": "stocks",
+     "help": "Bot nie otwiera nowej pozycji, gdy raport okresowy spółki wypada dziś albo w ciągu tylu dni "
+             "(kalendarz z Yahoo Finance). W dniu raportu cena potrafi skoczyć o kilkanaście procent w dowolną "
+             "stronę. 0 = wyłączone. Nie dotyczy ETF-ów (nie mają raportów) i krypto."},
     {"key": "regime_filter", "label": "Filtr rezimu rynku", "type": "bool",
      "help": "Nowe wejscia tylko gdy symbol rezimu jest powyzej swojej sredniej dziennej"},
     {"key": "regime_symbol", "label": "Symbol rezimu", "type": "str"},
@@ -90,6 +95,26 @@ COMMON_PARAMS = [
      "min": 0, "max": 0.5, "group": "exits"},
     {"key": "max_hold_days", "label": "Maks. czas trzymania pozycji (dni, 0 = bez limitu)", "type": "int",
      "min": 0, "max": 365, "group": "exits"},
+    # --- dzwignia i gra na spadki (app/levetf.py, app/risk.py)
+    {"key": "leverage_mode", "label": "Dźwignia i gra na spadki", "type": "choice", "options": ["off", "etf", "margin"],
+     "labels": {"off": "wyłączone — tylko kupno za własne pieniądze",
+                "etf": "ETF-y lewarowane i odwrotne (akcje USA, WIG20)",
+                "margin": "margin i krótka sprzedaż u brokera"},
+     "group": "lev",
+     "help": "ETF-y: sygnał liczony na spółce, bot kupuje ETF 2× na wzrost albo ETF odwrotny na spadek — strata najwyżej "
+             "do włożonej kwoty. Margin: pożyczone pieniądze i akcje u brokera (Alpaca, IBKR, Kraken) — strata może "
+             "przekroczyć wkład, są odsetki. Na prawdziwym koncie wymaga zgody w zakładce „Ryzyko”."},
+    {"key": "direction", "label": "Kierunek", "type": "choice", "options": ["long", "short", "both"],
+     "labels": {"long": "tylko wzrost", "short": "tylko spadek", "both": "wzrost i spadek"}, "group": "lev",
+     "help": "Sygnał spadku to lustrzane odbicie zasad strategii (np. wybicie maksimum → przebicie minimum, "
+             "cena nad średnią → pod średnią)."},
+    {"key": "leverage", "label": "Dźwignia (tylko margin)", "type": "float", "min": 1, "max": 5, "group": "lev",
+     "help": "Budżet bota × dźwignia = maks. wartość pozycji. Akcje: do 2× (Reg T), krypto: do 5× (Kraken). "
+             "Przy 2× i stop-lossie 5% jedna strata to ok. 10% budżetu."},
+    {"key": "etf_pairs", "label": "Własne pary ETF (spółka:ETF wzrost:ETF spadek)", "type": "list", "group": "lev",
+     "market": "stocks",
+     "help": "Opcjonalnie, np. NVDA:NVDL:NVDD. Dźwignię ETF-u można dopisać po gwiazdce: NVDA:NVDL*2:NVDD*-1. "
+             "Bez wpisu bot użyje wbudowanej listy (zakładka „Ryzyko” pokazuje, które ETF-y są dostępne)."},
     # --- radar altcoinow (tylko krypto)
     {"key": "universe_mode", "label": "Wybór monet", "type": "choice", "options": ["fixed", "radar"],
      "labels": {"fixed": "stała lista symboli", "radar": "radar: najmocniejsze monety z giełdy (codziennie)"},
@@ -136,6 +161,7 @@ COMMON_PARAMS = [
 CONTEXT_DEFAULTS = {"regime2_symbol": "", "regime2_sma_days": 200, "breadth_filter": False,
                     "breadth_min": 0.5, "breadth_sma_days": 200}
 SIGNAL_DEFAULTS = {"copy_signals": False, "manual_capital": 0.0}
+LEV_DEFAULTS = {"leverage_mode": "off", "direction": "long", "leverage": 1.0, "etf_pairs": []}
 LAB_DEFAULTS = {"lab_enabled": False, "lab_min_trades": 30, "lab_min_days": 14}
 EXIT_DEFAULTS = {"trail_atr_mult": 0.0, "breakeven_after_pct": 0.0, "max_hold_days": 0}
 ML_DEFAULTS = {"ml_filter": False, "ml_sizing": False, "ml_confidence": "mid", "ml_horizon": 24,
@@ -147,7 +173,8 @@ MARKET_DEFAULTS = {
                "regime_sma_days": 50, "poll_seconds": 60, "flatten_before_close_min": 0,
                "no_entry_after_open_min": 5, "insider_mode": "off", "insider_days": 30,
                "insider_min_buyers": 1, "insider_min_sellers": 3, "funds_mode": "off", "funds_min_bulls": 1,
-               "funds_min_bears": 2, "fractional_shares": False},
+               "funds_min_bears": 2, "fractional_shares": False,
+               "earnings_blackout_days": 0},
     "crypto": {"timeframe": "1Hour", "allocation_pct": 1.0, "risk_per_trade_pct": 0.005, "stop_loss_pct": 0.04,
                "take_profit_pct": 0.08, "max_positions": 3, "regime_filter": True, "regime_symbol": "BTC/USD",
                "regime_sma_days": 50, "poll_seconds": 60, "stop_limit_slippage_pct": 0.01},
@@ -158,6 +185,7 @@ for _m in MARKET_DEFAULTS.values():
     _m.update(LAB_DEFAULTS)
     _m.update(SIGNAL_DEFAULTS)
     _m.update(CONTEXT_DEFAULTS)
+    _m.update(LEV_DEFAULTS)
 MARKET_DEFAULTS["crypto"].update({"universe_mode": "fixed", "radar_top": 5, "radar_min_volume": 250000.0})
 
 
@@ -347,7 +375,89 @@ class CopyFunds(Strategy):
         return df
 
 
-STRATEGIES = {s.key: s for s in (SmaCross, MeanReversion, MlModel, RuleBuilder, CopyFunds)}
+class _NoSignals(Strategy):
+    """Strategie, ktore nie dzialaja na sygnalach ze swiec (siatka, DCA, alerty) - prowadzi je silnik osobno."""
+    special = ""
+
+    @classmethod
+    def warmup(cls, p):
+        return 2
+
+    @classmethod
+    def compute(cls, df, p):
+        df = df.copy()
+        df["entry"] = False
+        df["exit"] = False
+        return df
+
+
+class Grid(_NoSignals):
+    key = "grid"
+    special = "grid"
+    name = "Siatka (grid) — zarabia na wahaniach w przedziale"
+    description = ("Bot dzieli przedział cen (± X% wokół ceny startowej) na poziomy. Gdy cena spada przez poziom — "
+                   "dokupuje porcję, gdy wraca o poziom wyżej — sprzedaje ją z zyskiem. Najlepiej działa, gdy cena "
+                   "chodzi w bok; przy silnym spadku zostajesz z monetami kupionymi drożej (dlatego stop pod siatką), "
+                   "przy silnym wzroście siatka sprzedaje wszystko i czeka (albo przesuwa się, gdy włączysz "
+                   "„przesuwaj siatkę”). Stop-loss / take-profit z sekcji Ryzyko nie są tu używane.")
+    params = [
+        {"key": "grid_range_pct", "label": "Szerokość siatki: ± od ceny startowej", "type": "pct", "min": 0.01, "max": 0.6},
+        {"key": "grid_levels", "label": "Liczba poziomów", "type": "int", "min": 3, "max": 100},
+        {"key": "grid_geometric", "label": "Poziomy co ten sam procent (zamiast co tę samą kwotę)", "type": "bool"},
+        {"key": "grid_stop_pct", "label": "Stop: sprzedaj wszystko X% pod dolną krawędzią (0 = bez stopu)",
+         "type": "pct", "min": 0, "max": 0.5},
+        {"key": "grid_recenter", "label": "Przesuwaj siatkę, gdy cena z niej wyjdzie", "type": "bool",
+         "help": "Po wyjściu ceny ponad siatkę albo po stopie bot buduje nową siatkę wokół aktualnej ceny."},
+    ]
+    defaults = {"grid_range_pct": 0.1, "grid_levels": 12, "grid_geometric": True, "grid_stop_pct": 0.05,
+                "grid_recenter": True}
+
+
+class Dca(_NoSignals):
+    key = "dca"
+    special = "dca"
+    name = "Uśrednianie (DCA) — regularne zakupy albo dokupowanie na spadkach"
+    description = ("Dwa tryby. Regularny: kupuje za stałą część budżetu co X godzin (np. co tydzień ETF albo BTC), "
+                   "niezależnie od ceny — klasyczne uśrednianie. Na spadkach: pierwsze kupno, a potem dokupuje coraz "
+                   "większe porcje co X% spadku; gdy cena wróci ponad średnią o Y% — sprzedaje całość z zyskiem i "
+                   "zaczyna od nowa (jak boty DCA w 3Commas). Stop-loss / take-profit z sekcji Ryzyko nie są tu używane.")
+    params = [
+        {"key": "dca_mode", "label": "Tryb", "type": "choice", "options": ["regular", "safety"],
+         "labels": {"regular": "regularne zakupy co X godzin", "safety": "dokupowanie na spadkach + sprzedaż z zyskiem"}},
+        {"key": "dca_every_hours", "label": "Regularny: kupuj co (godziny; 24 = codziennie, 168 = co tydzień)",
+         "type": "int", "min": 1, "max": 2160},
+        {"key": "dca_order_pct", "label": "Wielkość zakupu (pierwszego) — % budżetu na symbol", "type": "pct",
+         "min": 0.005, "max": 1},
+        {"key": "dca_step_pct", "label": "Na spadkach: dokup co X% spadku", "type": "pct", "min": 0.003, "max": 0.5},
+        {"key": "dca_mult", "label": "Na spadkach: każde dokupienie × (większe od poprzedniego)", "type": "float",
+         "min": 1, "max": 3},
+        {"key": "dca_max_safety", "label": "Na spadkach: maks. dokupień", "type": "int", "min": 0, "max": 25},
+        {"key": "dca_tp_pct", "label": "Sprzedaj całość, gdy cena X% nad średnią (0 = nie sprzedawaj)",
+         "type": "pct", "min": 0, "max": 2},
+        {"key": "dca_stop_pct", "label": "Stop: sprzedaj całość X% pod średnią (0 = bez stopu)", "type": "pct",
+         "min": 0, "max": 0.9},
+    ]
+    defaults = {"dca_mode": "safety", "dca_every_hours": 168, "dca_order_pct": 0.1, "dca_step_pct": 0.03,
+                "dca_mult": 1.5, "dca_max_safety": 5, "dca_tp_pct": 0.03, "dca_stop_pct": 0.0}
+
+
+class TvAlerts(_NoSignals):
+    key = "tv_alerts"
+    special = "tv"
+    name = "Alerty z TradingView (webhook)"
+    description = ("Bot wykonuje alerty wysyłane z TradingView: wiadomość „buy” = kupno, „sell” = sprzedaż "
+                   "(a przy dźwigni „short” / „cover” = gra na spadek i jej koniec). Stop-loss, take-profit, budżet, "
+                   "dźwignia i bezpiecznik działają jak w innych botach. Adres webhooka i treść alertu pokazuje "
+                   "strona bota po zapisaniu. Tej strategii nie da się przetestować backtestem.")
+    params = [
+        {"key": "tv_max_age_min", "label": "Ignoruj alerty starsze niż (minuty)", "type": "int", "min": 1, "max": 1440},
+        {"key": "tv_passphrase", "label": "Hasło w treści alertu (opcjonalne, dodatkowa ochrona)", "type": "str"},
+    ]
+    defaults = {"tv_max_age_min": 30, "tv_passphrase": ""}
+
+
+STRATEGIES = {s.key: s for s in (SmaCross, MeanReversion, MlModel, RuleBuilder, CopyFunds, Grid, Dca, TvAlerts)}
+SPECIAL = {"grid", "dca"}                    # silnik prowadzi je osobno (bez sygnalow, bez SL/TP)
 
 
 # ------------------------------------------------------------------ szablony botow
@@ -475,6 +585,38 @@ def validate(market: str, strategy: str, p: dict) -> list:
         errors.append("Bot krypto przyjmuje tylko pary w formacie BTC/USD.")
     if market == "stocks" and any(is_crypto):
         errors.append("Bot akcyjny nie moze miec par krypto - zaloz osobnego bota krypto.")
+    mode, direction = p.get("leverage_mode", "off"), p.get("direction", "long")
+    lev = float(p.get("leverage") or 1)
+    if mode == "off" and direction != "long":
+        errors.append("Gra na spadki wymaga trybu dźwigni: „ETF-y lewarowane i odwrotne” albo „margin”.")
+    if mode == "etf" and market != "stocks":
+        errors.append("ETF-y lewarowane są tylko dla akcji — dla krypto wybierz „margin”.")
+    if mode != "margin" and lev > 1:
+        errors.append("Dźwignia większa niż 1 działa tylko w trybie „margin”.")
+    if mode == "margin" and market == "stocks" and lev > 2:
+        errors.append("Akcje: dźwignia najwyżej 2× (tyle pozwalają brokerzy na noc).")
+    if strategy in ("grid", "dca"):
+        if mode != "off":
+            errors.append("Siatka i uśrednianie działają bez dźwigni — wyłącz ją dla tego bota.")
+        if p.get("ml_filter") or p.get("ml_sizing") or p.get("lab_enabled"):
+            errors.append("Siatka i uśrednianie nie łączą się z ML ani laboratorium.")
+        if strategy == "grid" and market != "crypto":
+            errors.append("Siatka działa na krypto (rynek 24/7, ułamki monet). Dla akcji użyj uśredniania (DCA).")
+        if strategy == "grid":
+            lv, rng = int(p.get("grid_levels", 12)), float(p.get("grid_range_pct", 0.1))
+            step = 2 * rng / max(lv - 1, 1)
+            if step < 0.006:
+                errors.append(f"Siatka za gęsta: odstęp ok. {step:.2%} między poziomami nie pokryje prowizji "
+                              "(kupno + sprzedaż). Zmniejsz liczbę poziomów albo poszerz siatkę.")
+    if strategy == "tv_alerts" and (p.get("ml_filter") or p.get("ml_sizing") or p.get("lab_enabled")):
+        errors.append("Alerty z TradingView nie łączą się z ML ani laboratorium.")
+    if mode != "off" and (strategy in ("copy_funds", "ml_model") or p.get("ml_filter") or p.get("ml_sizing")):
+        errors.append("Dźwignia i gra na spadki nie łączą się z ML ani kopiowaniem funduszy (modele uczą się tylko kupna).")
+    if mode != "off" and p.get("lab_enabled"):
+        errors.append("Laboratorium wariantów nie obsługuje jeszcze dźwigni — wyłącz je dla tego bota.")
+    if mode != "off" and p.get("stop_loss_pct", 0) * lev > 0.5:
+        errors.append(f"Stop-loss × dźwignia = {p['stop_loss_pct'] * lev:.0%} budżetu pozycji na jednej stracie — "
+                      "za dużo (maks. 50%). Zmniejsz stop-loss albo dźwignię.")
     if p.get("timeframe") not in TIMEFRAMES:
         errors.append("Nieprawidlowy interwal.")
     if strategy == "rules":
@@ -486,6 +628,34 @@ def validate(market: str, strategy: str, p: dict) -> list:
     return errors
 
 
+def invert(df: pd.DataFrame) -> pd.DataFrame:
+    """Lustrzane odbicie ceny (1/cena): wzrost <-> spadek, maksimum <-> minimum.
+    Sygnał kupna strategii na odwróconych świecach = sygnał gry na spadek na prawdziwych."""
+    out = df.copy()
+    out["open"] = 1.0 / df["open"]
+    out["close"] = 1.0 / df["close"]
+    out["high"] = 1.0 / df["low"]
+    out["low"] = 1.0 / df["high"]
+    return out
+
+
+def with_short(strategy, df: pd.DataFrame, p: dict, d: pd.DataFrame = None) -> pd.DataFrame:
+    """Dopisuje kolumny 'sentry' / 'sexit' (wejście i wyjście z pozycji na spadek), gdy kierunek je dopuszcza.
+    Kolumny 'entry' / 'exit' zostają dla wzrostu (przy kierunku 'short' entry jest wyłączane)."""
+    d = strategy.compute(df, p) if d is None else d
+    direction = p.get("direction", "long") if p.get("leverage_mode", "off") != "off" else "long"
+    if direction in ("short", "both"):
+        s = strategy.compute(invert(df), p)
+        d["sentry"] = s["entry"].values
+        d["sexit"] = s["exit"].values
+    else:
+        d["sentry"] = False
+        d["sexit"] = False
+    if direction == "short":
+        d["entry"] = False
+    return d
+
+
 def leverage_warning(p: dict):
     ratio = p["risk_per_trade_pct"] / p["stop_loss_pct"]
     if ratio > 1:
@@ -494,10 +664,16 @@ def leverage_warning(p: dict):
     return None
 
 
+def lev_factor(p: dict) -> float:
+    """Dźwignia budżetu: tylko w trybie margin (ETF-y mają dźwignię w sobie)."""
+    return max(1.0, float(p.get("leverage") or 1)) if p.get("leverage_mode") == "margin" else 1.0
+
+
 def sized_notional(budget, p, buying_power):
-    """Wartosc pozycji bez ukrytej dzwigni: min(z ryzyka, budzet/max pozycji, sila nabywcza)."""
+    """Wartosc pozycji: min(z ryzyka, budzet/max pozycji, sila nabywcza). Przy marginie budzet x dzwignia,
+    ryzyko na transakcje liczone od budzetu wlasnego (strata przy stopie = ryzyko)."""
     by_risk = budget * p["risk_per_trade_pct"] / p["stop_loss_pct"]
-    cap = budget / p["max_positions"] * 0.98
+    cap = budget * lev_factor(p) / p["max_positions"] * 0.98
     return max(0.0, min(by_risk, cap, buying_power * 0.98))
 
 

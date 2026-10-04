@@ -1,0 +1,243 @@
+<!doctype html><html lang="pl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TradingApp — instrukcja</title><style>:root{--bg:#0b1220;--panel:#111a2b;--text:#e6ecf5;--muted:#93a1b8;--accent:#f5b731;--line:#22304a}
+@media (prefers-color-scheme: light){:root{--bg:#f6f7fb;--panel:#fff;--text:#172033;--muted:#5b6780;--accent:#b7790b;--line:#dde2ec}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:860px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:28px;line-height:1.25} h2{margin-top:36px;padding-top:12px;border-top:1px solid var(--line);font-size:21px} h3{font-size:17px;margin-top:22px}
+a{color:var(--accent)} code{background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.92em}
+pre{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto} pre code{border:0;padding:0}
+blockquote{margin:16px 0;padding:10px 16px;border-left:4px solid var(--accent);background:var(--panel);border-radius:0 8px 8px 0}
+table{border-collapse:collapse;width:100%;display:block;overflow-x:auto} th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top} th{background:var(--panel)}
+hr{border:0;border-top:1px solid var(--line)} li{margin:3px 0}
+</style></head><body><main><h1 id="tradingapp-instalacja-i-pierwsze-kroki-windows">TradingApp — instalacja i pierwsze kroki (Windows)</h1>
+<p>TradingApp to panel do automatycznego handlu (boty) działający <strong>na Twoim komputerze</strong>.
+- Klucze do brokerów, hasło i historia zostają u Ciebie — nic nie trafia na cudzy serwer.
+- Ta instrukcja prowadzi od pobrania do pierwszego bota na koncie papierowym (na niby).
+- Całość zajmie około 15 minut.</p>
+<blockquote>
+<p><strong>Najpierw na papierze.</strong> Każdą strategię testuj kilka tygodni na koncie papierowym, zanim użyjesz
+prawdziwych pieniędzy.
+- Wyniki z przeszłości nie gwarantują przyszłych.
+- TradingApp to narzędzie, nie porada inwestycyjna.</p>
+</blockquote>
+<hr />
+<h2 id="1-wymagania">1. Wymagania</h2>
+<ul>
+<li>Windows 10 lub 11, 64-bitowy.</li>
+<li>Około 600 MB miejsca na dysku.</li>
+<li>Stały internet.</li>
+<li>Komputer, który może być włączony wtedy, gdy mają działać boty. Boty działają tylko, gdy działa komputer.</li>
+<li>Na 24/7 lepszy jest stacjonarny komputer, mini-PC albo serwer NAS — patrz <a href="#14-alternatywa-nas-albo-serwer-docker">punkt 14</a>.</li>
+</ul>
+<p>Nie trzeba instalować Pythona ani niczego innego. Instalator ma wszystko w sobie.</p>
+<h2 id="2-pobranie">2. Pobranie</h2>
+<ol>
+<li>Wejdź na <strong>https://github.com/xboff57/tradingapp-demo/releases/latest</strong>.</li>
+<li>W sekcji <strong>Assets</strong> kliknij <strong><code>TradingApp-Setup-X.Y.Z.exe</code></strong> (X.Y.Z to numer wersji).</li>
+<li><em>(Opcjonalnie)</em> sprawdź, czy plik nie został podmieniony. W PowerShellu, w folderze Pobrane, wpisz:
+   <code>Get-FileHash .\TradingApp-Setup-X.Y.Z.exe</code>
+   Wynik porównaj z sumą <strong>SHA256</strong> w opisie wydania na GitHubie.</li>
+</ol>
+<h2 id="3-ostrzezenie-windows-smartscreen">3. Ostrzeżenie Windows SmartScreen</h2>
+<p>Instalator nie ma płatnego certyfikatu podpisu kodu, więc Windows może pokazać okno
+<strong>„System Windows ochronił ten komputer”</strong>.</p>
+<p>Kliknij <strong>Więcej informacji → Uruchom mimo to</strong>.</p>
+<p>Ostrzeżenie oznacza tylko „nieznany wydawca”. Kod programu jest publiczny w tym repozytorium, a instalator buduje się automatycznie na serwerach GitHuba z tego kodu (zakładka <strong>Actions</strong>).</p>
+<h2 id="4-instalacja">4. Instalacja</h2>
+<p>Instalator nie wymaga uprawnień administratora. Program trafia do <code>%LOCALAPPDATA%\Programs\TradingApp</code>.</p>
+<ol>
+<li><strong>Przeczytaj ostrzeżenia o ryzyku</strong> i kliknij „Akceptuję”.</li>
+<li><strong>Opcje:</strong></li>
+<li><strong>Uruchamiaj w tle po zalogowaniu do Windows</strong> (zalecane) — boty startują same po włączeniu komputera, bez otwierania panelu.</li>
+<li><strong>Nie usypiaj komputera, gdy działa TradingApp</strong> (zalecane) — komputer nie zaśnie, dopóki działa program. Ekran może się wygaszać. Ustawienia zasilania Windows nie są zmieniane, a po zamknięciu programu komputer usypia normalnie.</li>
+<li><strong>Skrót na pulpicie.</strong></li>
+<li><strong>Zainstaluj → Zakończ.</strong> Panel otworzy się w przeglądarce pod adresem <strong>http://127.0.0.1:8420</strong>.</li>
+</ol>
+<p><strong>Laptop:</strong> zamknięcie pokrywy zwykle usypia komputer, nawet z tą opcją. Jeśli boty mają działać przy zamkniętej pokrywie, ustaw to sam: Panel sterowania → Opcje zasilania → „Wybierz, co ma robić zamknięcie pokrywy” → „Nic nie rób” (przy zasilaniu z sieci).</p>
+<h2 id="5-pierwsze-uruchomienie-login-i-haso">5. Pierwsze uruchomienie: login i hasło</h2>
+<p>Przy pierwszym otwarciu panel poprosi o <strong>utworzenie loginu i hasła</strong>:
+- login: 3–32 znaki,
+- hasło: co najmniej 10 znaków.</p>
+<p>Zapisz je w menedżerze haseł. Kreator działa tylko z tego komputera.</p>
+<p>Zaraz potem włącz <strong>logowanie dwuetapowe</strong>: zakładka <strong>Logowanie → Kod z aplikacji (2FA)</strong>. Zeskanuj kod QR w Google Authenticator, Microsoft Authenticator albo Aegis. <strong>Zapisz kody awaryjne.</strong></p>
+<h2 id="6-podaczenie-konta-na-niby">6. Podłączenie konta (na niby)</h2>
+<p>Na start masz wbudowane konto <strong>demo</strong> — symulację ze 100 000 $ wirtualnej gotówki. Do prawdziwych cen polecamy darmowe konta papierowe.</p>
+<h3 id="alpaca-paper-akcje-i-etf-y-z-usa-za-darmo-bez-wpaty">Alpaca Paper — akcje i ETF-y z USA, za darmo, bez wpłaty</h3>
+<ol>
+<li>Załóż konto na <strong>https://alpaca.markets</strong> (Sign up). Wystarczy e-mail.</li>
+<li>Po zalogowaniu przełącz się na <strong>Paper Trading</strong> (lewy górny róg).</li>
+<li>Po prawej <strong>API Keys → Generate New Keys</strong>. Skopiuj <strong>Key</strong> i <strong>Secret</strong> — Secret widać tylko raz.</li>
+<li>W TradingApp: <strong>Konta → + Podłącz platformę → Alpaca</strong>:</li>
+<li>nazwa, np. <code>alpaca</code>,</li>
+<li>tryb <strong>Na niby</strong>,</li>
+<li>wklej klucze,</li>
+<li><strong>Sprawdź połączenie → Zapisz konto</strong>.</li>
+</ol>
+<h3 id="kraken-kryptowaluty-tryb-na-niby-bez-kluczy">Kraken — kryptowaluty, tryb na niby bez kluczy</h3>
+<ol>
+<li><strong>Konta → + Podłącz platformę → Kraken</strong>.</li>
+<li>Wybierz tryb <strong>Na niby</strong>, ustaw walutę (EUR) i kapitał na start.</li>
+</ol>
+<p>Bot handluje po prawdziwych cenach Krakena, a transakcje są tylko symulowane.</p>
+<h3 id="konto-z-prawdziwymi-pieniedzmi-pozniej">Konto z prawdziwymi pieniędzmi (później)</h3>
+<p>Klucze API giełd i brokerów twórz <strong>zawsze bez prawa wypłaty</strong> (bez „Withdraw”) i najlepiej z ograniczeniem do Twojego adresu IP.
+- Klucze są zapisane tylko na tym komputerze, zaszyfrowane.
+- Dźwignia na prawdziwym koncie wymaga osobnej zgody (hasło i 2FA) w zakładce <strong>Ryzyko</strong>.
+- Interactive Brokers (GPW) wymaga dodatkowo programu IB Gateway (zalogowanego na konto) — <a href="https://github.com/xboff57/tradingapp-demo/blob/main/docs/FUNKCJE.md">opis funkcji</a>, rozdział 5e.</p>
+<h2 id="7-pierwszy-bot-z-galerii">7. Pierwszy bot z galerii</h2>
+<ol>
+<li><strong>Analiza → Galeria strategii.</strong> Każda strategia ma opis, poziom ryzyka i wynik testu na danych historycznych (zwrot, maksymalne obsunięcie, porównanie z „kup i trzymaj”).</li>
+<li><strong>Backtest na moich danych</strong> — sprawdź strategię w swoim okresie i na swoim źródle danych.</li>
+<li><strong>Utwórz bota</strong> → wybierz konto papierowe → <strong>Utwórz bota</strong> → na stronie bota <strong>Start</strong>.</li>
+<li>Bot sprawdza rynek co kilka minut.</li>
+<li>Akcje USA handlują od 15:30 do 22:00 czasu polskiego, w dni robocze.</li>
+<li>Krypto handluje całą dobę.</li>
+<li>Na stronie bota widać dziennik, pozycje i transakcje.</li>
+</ol>
+<p><strong>Masz własny pomysł?</strong> Wpisz go w polu <strong>„Opisz strategię słowami”</strong> w Galerii, np. „kupuj spółki z S&amp;P 500, gdy kurs przebije maksimum z 50 dni, stop 8%”. Wymaga własnego klucza API Claude — patrz <a href="#10-ustawienia-env">punkt 10</a>.</p>
+<p>Inne rodzaje botów:
+- siatka i uśrednianie (DCA) — <a href="https://github.com/xboff57/tradingapp-demo/blob/main/docs/FUNKCJE.md">opis funkcji</a>, rozdział 5k,
+- alerty z TradingView — <a href="https://github.com/xboff57/tradingapp-demo/blob/main/docs/FUNKCJE.md">opis funkcji</a>, rozdział 5l.</p>
+<h2 id="8-codzienna-obsuga">8. Codzienna obsługa</h2>
+<p>Wszystkie skróty są w <strong>Menu Start → TradingApp</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Skrót</th>
+<th>Do czego</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TradingApp</strong></td>
+<td>uruchamia program i otwiera panel; jeśli już działa — tylko otwiera panel</td>
+</tr>
+<tr>
+<td><strong>Zatrzymaj TradingApp</strong></td>
+<td>wyłącza program i boty; pozycje u brokera zostają ze stop-lossami</td>
+</tr>
+<tr>
+<td><strong>TradingApp — wersja demo</strong></td>
+<td>osobna wersja z przykładowymi danymi (port 8765), do obejrzenia funkcji</td>
+</tr>
+<tr>
+<td><strong>Folder danych i ustawień</strong></td>
+<td>baza, logi, plik <code>.env</code></td>
+</tr>
+<tr>
+<td><strong>Instrukcja</strong></td>
+<td>ten dokument</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Program pracuje w tle i nie ma okna. Zamknięcie przeglądarki <strong>nie</strong> zatrzymuje botów.</li>
+<li>Jeśli program wyłączy się przez błąd, uruchamia się ponownie sam (do 5 razy w ciągu 10 minut).</li>
+</ul>
+<h2 id="9-powiadomienia-na-telefon">9. Powiadomienia na telefon</h2>
+<ol>
+<li><strong>System → Powiadomienia → Włącz ntfy</strong>.</li>
+<li>Zainstaluj aplikację <strong>ntfy</strong> (Android / iOS) i zasubskrybuj temat pokazany w panelu. Zamiast tego możesz podłączyć Telegram.</li>
+<li>Dostaniesz powiadomienia o transakcjach, błędach i dziennych podsumowaniach.</li>
+</ol>
+<p><strong>Strażnik z zewnątrz:</strong> jeśli komputer się wyłączy, sam program nie da znać. Darmowy <strong>healthchecks.io</strong> wyśle Ci SMS albo e-mail, gdy panel przestanie dawać znak życia. Konfiguracja: <strong>System → Strażnik z zewnątrz</strong>.</p>
+<h2 id="10-ustawienia-env">10. Ustawienia (.env)</h2>
+<p>Plik <strong><code>.env</code></strong> jest w folderze danych (Menu Start → <strong>Folder danych i ustawień</strong>). Zwykle nic tu nie trzeba zmieniać. Po zmianie: <strong>Zatrzymaj TradingApp</strong>, potem <strong>TradingApp</strong>.</p>
+<table>
+<thead>
+<tr>
+<th>Ustawienie</th>
+<th>Do czego</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SEC_USER_AGENT=Imię Nazwisko email</code></td>
+<td>dane o insiderach i funduszach z SEC (zakładka Sygnały)</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY=</code></td>
+<td>strategia z opisu słownego (klucz z console.anthropic.com, płatny za użycie, ułamek centa za opis; ustaw tam limit wydatków)</td>
+</tr>
+<tr>
+<td><code>TV_WEBHOOK_URL=</code></td>
+<td>alerty z TradingView (opis funkcji, rozdział 5l)</td>
+</tr>
+<tr>
+<td><code>PANEL_PORT=8420</code></td>
+<td>inny port, jeśli 8420 jest zajęty</td>
+</tr>
+</tbody>
+</table>
+<h2 id="11-dostep-z-telefonu-bezpiecznie">11. Dostęp z telefonu (bezpiecznie)</h2>
+<p><strong>Nigdy nie przekierowuj portu 8420 na routerze.</strong> Użyj Tailscale — prywatnej sieci VPN, darmowej do użytku osobistego:</p>
+<ol>
+<li>Zainstaluj Tailscale na komputerze i na telefonie, zaloguj się na to samo konto.</li>
+<li>W panelu administracyjnym Tailscale (login.tailscale.com → <strong>DNS</strong>) włącz <strong>HTTPS Certificates</strong>.</li>
+<li>Na komputerze, w PowerShellu:
+   <code>tailscale serve --bg 8420</code></li>
+<li>Polecenie pokaże adres w rodzaju <code>https://twoj-komputer.tail1234.ts.net</code>. Otwórz go na telefonie.</li>
+</ol>
+<p>Działa tylko na Twoich urządzeniach, z certyfikatem HTTPS. Panel nadal słucha tylko lokalnie, więc nie trzeba zmieniać <code>PANEL_HOST</code>.</p>
+<h2 id="12-aktualizacja-kopia-zapasowa-przeniesienie">12. Aktualizacja, kopia zapasowa, przeniesienie</h2>
+<ul>
+<li><strong>Aktualizacja:</strong></li>
+<li>Pobierz nowszy <code>TradingApp-Setup-…exe</code> z Releases i uruchom go.</li>
+<li>Instalator sam zatrzyma starą wersję.</li>
+<li>Boty, konta, hasło i historia zostają.</li>
+<li>Lista zmian: <code>CHANGELOG.md</code>.</li>
+<li><strong>Kopia zapasowa:</strong> skopiuj cały folder <code>%LOCALAPPDATA%\TradingApp\dane</code>, najlepiej po zatrzymaniu programu.</li>
+<li><strong>Przeniesienie na inny komputer:</strong></li>
+<li>Zainstaluj TradingApp na nowym komputerze.</li>
+<li>Zatrzymaj go.</li>
+<li>Wklej skopiowany folder <code>dane</code>.</li>
+<li>Uruchom.</li>
+<li><strong>Odinstalowanie:</strong> Ustawienia Windows → Aplikacje → TradingApp → Odinstaluj. Folder danych zostaje — usuń go ręcznie, jeśli chcesz wszystko skasować.</li>
+</ul>
+<h2 id="13-rozwiazywanie-problemow">13. Rozwiązywanie problemów</h2>
+<table>
+<thead>
+<tr>
+<th>Problem</th>
+<th>Co zrobić</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Panel się nie otwiera</td>
+<td>Menu Start → <strong>TradingApp</strong>. Poczekaj 20 s i odśwież http://127.0.0.1:8420. Logi: folder danych → <code>tradingapp.log</code>, <code>aplikacja_konsola.log</code>, <code>launcher.log</code></td>
+</tr>
+<tr>
+<td>„Port zajęty” / inny program na 8420</td>
+<td>w <code>.env</code> zmień <code>PANEL_PORT</code>, np. na <code>8430</code>, i uruchom ponownie</td>
+</tr>
+<tr>
+<td>Zapomniane hasło lub zgubiony telefon z 2FA</td>
+<td>najpierw spróbuj kodu awaryjnego. Jeśli go nie masz — patrz pod tabelą</td>
+</tr>
+<tr>
+<td>Bot nic nie robi</td>
+<td>sprawdź dziennik bota. Najczęściej: rynek zamknięty, brak sygnału albo budżety botów na koncie przekraczają 100%</td>
+</tr>
+<tr>
+<td>Komputer usypia mimo opcji</td>
+<td>laptop z zamkniętą pokrywą — patrz punkt 4. Sprawdź, czy TradingApp działa (Menu Start → TradingApp)</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Reset hasła i 2FA:</strong> w PowerShellu wpisz:</p>
+<pre><code>&amp; &quot;$env:LOCALAPPDATA\Programs\TradingApp\python\python.exe&quot; &quot;$env:LOCALAPPDATA\Programs\TradingApp\launcher.pyw&quot; --reset-logowania
+</code></pre>
+<p>Potem uruchom TradingApp — kreator poprosi o nowy login i hasło. Boty, konta i historia zostają.</p>
+<p>Błąd w programie? Zgłoś go w zakładce <strong>Issues</strong> na GitHubie. Dołącz fragment <code>tradingapp.log</code>, ale <strong>bez kluczy API</strong>.</p>
+<h2 id="14-alternatywa-nas-albo-serwer-docker">14. Alternatywa: NAS albo serwer (Docker)</h2>
+<p>Jeśli masz serwer NAS (Synology, QNAP, Asustor) albo VPS, TradingApp może działać tam 24/7 w Dockerze. Komputer domowy nie musi być wtedy włączony.
+- Gotowa paczka dla Dockera jest w przygotowaniu. Jeśli Cię interesuje, napisz w zakładce <strong>Issues</strong>.
+- Dostęp: przez Tailscale.</p>
+<h2 id="15-bezpieczenstwo-w-skrocie">15. Bezpieczeństwo w skrócie</h2>
+<ul>
+<li>Hasło panelu i 2FA włączone.</li>
+<li>Klucze API bez prawa wypłaty.</li>
+<li>Panel niewystawiony do internetu — tylko Tailscale.</li>
+<li>Najpierw papier, potem małe kwoty.</li>
+<li>Dzienny limit straty i wyłącznik awaryjny: zakładka <strong>Ryzyko</strong>.</li>
+</ul></main></body></html>

@@ -34,7 +34,7 @@ def round_trips(trades):
     open_buys = defaultdict(list)
     out = []
     for t in trades:
-        if t["side"] == "BUY":
+        if t["side"] in ("BUY", "SHORT"):
             open_buys[t["symbol"]].append(t)
         else:
             buy = open_buys[t["symbol"]].pop(0) if open_buys[t["symbol"]] else None
@@ -116,7 +116,7 @@ def build(db, bot, kind, start, end, broker=None):
     trades = db.trades_between(bot["id"], s_iso, e_iso)
     closed = round_trips(db.all("SELECT * FROM trades WHERE bot_id=? AND ts<=? ORDER BY id", (bot["id"], e_iso)))
     closed = [r for r in closed if r["t_out"] >= s_iso]
-    buys = [t for t in trades if t["side"] == "BUY"]
+    buys = [t for t in trades if t["side"] in ("BUY", "SHORT")]
     realized = sum(r["pnl"] for r in closed)
     wins = [r for r in closed if r["pnl"] > 0]
     losses = [r for r in closed if r["pnl"] <= 0]

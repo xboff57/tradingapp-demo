@@ -25,7 +25,9 @@ from . import radar
 from . import notify
 import numpy as np
 import pandas as pd
-from .strategies import STRATEGIES, TIMEFRAME_MINUTES, full_params, sized_notional
+from .strategies import STRATEGIES, TIMEFRAME_MINUTES, full_params, lev_factor, sized_notional, with_short
+from . import risk
+from . import levetf
 
 logging.basicConfig(
     level=logging.INFO,
@@ -96,6 +98,47 @@ class BotRunner(threading.Thread):
         from .lab import Lab
         self.lab = Lab(db, self) if self.p.get("lab_enabled") else None
         self.lab_err = None
+        self.last_acct = None
+        self.special = None
+        self.tv_pending = set()
+        if bot["strategy"] in ("grid", "dca"):
+            from .special import SpecialRunner
+            self.special = SpecialRunner(self)
+            self.owned_only = True
+        # --- dzwignia i gra na spadki
+        self.lev_mode = self.p.get("leverage_mode", "off")
+        self.direction = self.p.get("direction", "long") if self.lev_mode != "off" else "long"
+        self.lev = lev_factor(self.p)
+        self.etf, self.etf_of = {}, {}
+        self.risk_logged = None
+        if self.lev_mode != "off":
+            ok, why = risk.leverage_allowed(acc)
+            if not ok:
+                raise BrokerError(why)
+            self.lev = min(self.lev, risk.max_leverage(acc, self.market))
+        if self.lev_mode == "margin":
+            if self.market == "crypto" and acc.type == "gielda" and not acc.paper:
+                raise BrokerError("Margin na krypto obsługujemy tylko na Krakenie (albo na koncie na niby).")
+            if self.market == "crypto" and not hasattr(self.broker, "margin_open"):
+                raise BrokerError("To konto nie obsługuje marginu.")
+            if self.market == "stocks" and self.direction != "long" and not hasattr(self.broker, "short_bracket"):
+                raise BrokerError("To konto nie obsługuje krótkiej sprzedaży.")
+            self.broker.use_margin = True
+        if self.lev_mode == "etf":
+            self.owned_only = True                    # bot pilnuje tylko ETF-ow, ktore sam kupil
+            custom = levetf.parse_custom(self.p.get("etf_pairs"))
+            for u in self.symbols:
+                pr = levetf.pick(u, custom)
+                if self.direction == "long":
+                    pr["bear"] = None
+                if self.direction == "short":
+                    pr["bull"] = None
+                if pr["bull"] or pr["bear"]:
+                    self.etf[u] = pr
+                    for side in ("bull", "bear"):
+                        if pr[side]:
+                            self.etf_of[pr[side][0]] = (u, side, pr[side][1])
+                            self.by_norm[norm(pr[side][0])] = pr[side][0]
 
     # ---------------------------------------------------------- pomocnicze
     def log(self, msg, level="INFO"):
@@ -104,7 +147,7 @@ class BotRunner(threading.Thread):
 
     def bars(self):
         start = lookback_start(self.p, self.market, self.warmup)
-        raw = self.broker.data.bars(self.symbols, self.p["timeframe"], start)
+        raw = self.broker.data.bars(list(dict.fromkeys(self.symbols + list(self.etf_of))), self.p["timeframe"], start)
         return {s: drop_unfinished(df, self.p["timeframe"]) for s, df in raw.items()}
 
     def ml_status(self, mid, why):
@@ -141,15 +184,68 @@ class BotRunner(threading.Thread):
                 row = d.iloc[-1].copy()
                 row["entry"] = False
             row["ml_prob"] = np.nan
+        elif self.bot["strategy"] == "tv_alerts":
+            row = self.tv_row(df, sym)
+        elif self.lev_mode != "off":
+            row = with_short(self.strategy, df, self.p).iloc[-1].copy()
+            row["ml_prob"] = np.nan
         else:
             row = self.strategy.compute(df, self.p).iloc[-1].copy()
             row["ml_prob"] = np.nan
+        if "sentry" not in row:
+            row["sentry"] = False
+            row["sexit"] = False
+        if (row["entry"] or row["sentry"]) and sym and self.market == "stocks" and self.p.get("earnings_blackout_days"):
+            from . import calendar_events
+            blocked, rep = calendar_events.blackout(sym, self.p["earnings_blackout_days"])
+            if blocked:
+                row["entry"] = False
+                row["sentry"] = False
+                if self.ext_logged.get(("cal", sym)) != df.index[-1]:
+                    self.ext_logged[("cal", sym)] = df.index[-1]
+                    self.log(f"{sym}: sygnał kupna wstrzymany — raport okresowy {rep} "
+                             f"(blokada {self.p['earnings_blackout_days']} dni przed raportem)")
         if row["entry"] and sym and not self.external_ok(sym):
             row["entry"] = False
             if self.ext_logged.get(sym) != df.index[-1]:
                 self.ext_logged[sym] = df.index[-1]
                 self.log(f"{sym}: sygnal kupna zablokowany przez filtr zewnetrzny ({self.ext_reason(sym)})")
         return row
+
+    def tv_row(self, df, sym):
+        """Alerty TradingView: najnowszy nieprzetworzony alert dla symbolu (nie starszy niż limit) -> sygnał."""
+        row = pd.Series({"entry": False, "exit": False, "sentry": False, "sexit": False,
+                         "close": float(df["close"].iloc[-1]), "ml_prob": np.nan})
+        if not sym:
+            return row
+        cut = (datetime.now(timezone.utc) - timedelta(minutes=int(self.p.get("tv_max_age_min", 30)))).isoformat()
+        alerts = self.db.all("SELECT * FROM tv_alerts WHERE bot_id=? AND status='new' AND (symbol=? OR symbol=?) "
+                             "ORDER BY id", (self.id, sym, norm(sym)))
+        for a in alerts:
+            if a["ts"] < cut:
+                self.db.execute("UPDATE tv_alerts SET status='expired', note='za stary' WHERE id=?", (a["id"],))
+                continue
+            act = a["action"]
+            if act in ("buy", "long"):
+                row["entry"] = True
+            elif act in ("sell", "exit", "close_long"):
+                row["exit"] = True
+            elif act == "short":
+                row["sentry"] = True
+            elif act in ("cover", "close_short"):
+                row["sexit"] = True
+            elif act in ("close", "flat"):
+                row["exit"] = row["sexit"] = True
+            if a.get("price"):
+                row["close"] = float(a["price"])
+            self.tv_pending.add(a["id"])
+        return row
+
+    def tv_done(self):
+        if self.tv_pending:
+            ids = ",".join(str(int(i)) for i in self.tv_pending)
+            self.db.execute(f"UPDATE tv_alerts SET status='done' WHERE id IN ({ids}) AND status='new'")
+            self.tv_pending.clear()
 
     def refresh_external(self):
         """Raz dziennie: sygnaly insiderow / funduszy dla symboli bota (dane z SEC, cache w bazie)."""
@@ -227,13 +323,23 @@ class BotRunner(threading.Thread):
         st = self.db.pos_states(self.id).get(norm(symbol))
         res = self.broker.close_position(symbol)
         if res:
+            short = self.is_short(st, pos or {"qty": res["qty"]})
+            sign = -1 if short else 1
+            qty = abs(res["qty"])
             entry = st["entry"] if st else (pos or {}).get("avg_entry", res["price"])
-            pnl = (res["price"] - entry) * res["qty"]
-            pct = (res["price"] / entry - 1) * 100 if entry else None
-            self.db.add_trade(self.id, symbol, "SELL", res["qty"], res["price"], reason, pnl, pct)
-            self.log(f"SPRZEDAZ {symbol} x{res['qty']:g} ~{fp(res['price'])} ({reason}) | "
-                     f"P/L {pnl:+,.2f} USD ({pct:+.2f}%)")
+            pnl = (res["price"] - entry) * qty * sign
+            pct = (res["price"] / entry - 1) * 100 * sign if entry else None
+            self.db.add_trade(self.id, symbol, "COVER" if short else "SELL", qty, res["price"], reason, pnl, pct)
+            cur = (self.last_acct or {}).get("currency") or self.acc.extra.get("quote", "USD")
+            self.log(f"{'ODKUPIENIE (koniec gry na spadek)' if short else 'SPRZEDAZ'} {symbol} x{qty:g} "
+                     f"~{fp(res['price'])} ({reason}) | P/L {pnl:+,.2f} {cur} ({pct:+.2f}%)")
         self.db.del_pos_state(self.id, norm(symbol))
+
+    @staticmethod
+    def is_short(st, pos=None):
+        if st and st.get("side"):
+            return st["side"] == "short"
+        return bool(pos and float(pos.get("qty") or 0) < 0)
 
     def reconcile(self, positions):
         """Pozycja zniknela, a bot jej nie zamykal -> zamknal ja stop/TP na serwerze."""
@@ -241,8 +347,9 @@ class BotRunner(threading.Thread):
             if s in positions:
                 continue
             sym = self.by_norm.get(s, s)
-            try:                                       # zlecenie kupna jeszcze czeka (np. rynek zamkniety) - to nie stop
-                if any(o["side"] == "buy" for o in self.broker.open_orders(sym)):
+            short = self.is_short(st)
+            try:                                       # zlecenie wejscia jeszcze czeka (np. rynek zamkniety) - to nie stop
+                if any(o["side"] == ("sell" if short else "buy") for o in self.broker.open_orders(sym)):
                     continue
             except Exception:
                 continue
@@ -252,12 +359,16 @@ class BotRunner(threading.Thread):
                                                   - timedelta(days=3)).get(sym)["close"].iloc[-1]
             except Exception:
                 pass
-            hit_tp = st["tp"] and price_now and price_now >= st["tp"] * 0.995
+            if short:
+                hit_tp = st["tp"] and price_now and price_now <= st["tp"] * 1.005
+            else:
+                hit_tp = st["tp"] and price_now and price_now >= st["tp"] * 0.995
             price = st["tp"] if hit_tp else (st["sl"] or st["entry"])
             reason = "take-profit (serwer)" if hit_tp else "stop-loss (serwer)"
-            pnl = (price - st["entry"]) * st["qty"]
-            self.db.add_trade(self.id, sym, "SELL", st["qty"], price, reason + ", cena szacunkowa",
-                              pnl, (price / st["entry"] - 1) * 100)
+            sign = -1 if short else 1
+            pnl = (price - st["entry"]) * abs(st["qty"]) * sign
+            self.db.add_trade(self.id, sym, "COVER" if short else "SELL", abs(st["qty"]), price,
+                              reason + ", cena szacunkowa", pnl, (price / st["entry"] - 1) * 100 * sign)
             self.db.del_pos_state(self.id, s)
             self.log(f"{sym}: pozycja zamknieta przez {reason} ~{fp(price)} | P/L {pnl:+,.2f} USD")
 
@@ -267,7 +378,7 @@ class BotRunner(threading.Thread):
             return
         realized, _, _ = self.db.realized_pnl(self.id)
         unreal = sum(p["unrealized"] for p in mine.values())
-        exposure = sum(p["market_value"] for p in mine.values())
+        exposure = sum(abs(p["market_value"]) for p in mine.values())
         self.db.add_equity("bot", self.id, equity=realized + unreal, exposure=exposure,
                            realized=realized, unrealized=unreal)
         self.last_snapshot = now
@@ -348,17 +459,30 @@ class BotRunner(threading.Thread):
     # ---------------------------------------------------------- cykl
     def cycle(self):
         acct = self.broker.account()
+        self.last_acct = acct
         positions = self.broker.positions()
         self.refresh_universe(positions)
         mine = self.mine(positions)
         self.reconcile(positions)
         budget = acct["equity"] * self.p["allocation_pct"]
 
-        if self.market == "crypto":
+        if self.special:
+            if self.market == "stocks":
+                clock = self.broker.clock(self.symbols) if getattr(self.broker, "per_symbol_clock", False) \
+                    else self.broker.clock()
+                if not clock["is_open"]:
+                    now = datetime.now(timezone.utc)
+                    if not self.last_closed_log or now - self.last_closed_log > timedelta(minutes=60):
+                        self.log("Rynek akcji zamkniety.")
+                        self.last_closed_log = now
+                    return
+            self.special.cycle(acct, positions, budget)
+        elif self.market == "crypto":
             self.crypto_cycle(acct, positions, mine, budget)
         else:
             self.stock_cycle(acct, positions, mine, budget)
 
+        self.tv_done()
         mine = self.mine(self.broker.positions())
         self.snapshot(mine)
         now = datetime.now(timezone.utc)
@@ -369,29 +493,76 @@ class BotRunner(threading.Thread):
                      f"otwarte P/L {unreal:+,.2f} {cur} | kapital konta {acct['equity']:,.2f} {cur}")
             self.last_heartbeat = now
 
+    def risk_gate(self, mine):
+        """Bezpiecznik konta (zakładka Ryzyko): wyłącznik i dzienny limit straty."""
+        ok, why = risk.entries_allowed(self.acc, self.last_acct or {})
+        if ok:
+            self.risk_logged = None
+            return True
+        if self.risk_logged != why:
+            self.risk_logged = why
+            self.log(f"Nowe wejścia wstrzymane: {why}.", "WARNING")
+            if self.lev_mode != "off" and risk.load().get("close_leveraged_on_limit") and risk.tripped_today(self.acc.name):
+                for s, pos in mine.items():
+                    self.close(self.by_norm.get(s, pos["symbol"]), "dzienny limit straty konta", pos)
+        return False
+
     def entries(self, bars, positions, mine, budget, buying_power, execute):
-        if not self.regime[0]:
+        regime_on = bool(context.parts(self.p))
+        long_ok = self.regime[0] and self.direction in ("long", "both")
+        short_ok = (not self.regime[0] if regime_on else True) and self.direction in ("short", "both")
+        if not (long_ok or short_ok):
+            return
+        if not self.risk_gate(mine):
             return
         busy = set(positions) | {norm(o["symbol"]) for o in self.broker.open_orders()}
         slots = self.p["max_positions"] - len(mine)
-        used = sum(p["market_value"] for p in mine.values())
+        used = sum(abs(p["market_value"]) for p in mine.values())
         for sym in self.symbols:
             if slots <= 0:
                 break
-            if norm(sym) in busy or sym not in bars:
+            if sym not in bars:
+                continue
+            if self.lev_mode == "etf":
+                pr = self.etf.get(sym)
+                if not pr or any(x and norm(x[0]) in busy for x in (pr["bull"], pr["bear"])):
+                    continue
+            elif norm(sym) in busy:
                 continue
             sig = self.signals(bars[sym], sym)
-            if sig is None or not sig["entry"] or sig["exit"]:
-                continue                        # wejscie i wyjscie na tej samej swiecy = brak wejscia (bez "pily")
-            available = min(buying_power, budget - used)
-            notional = sized_notional(budget, self.p, available)
+            if sig is None:
+                continue
+            side = None
+            if long_ok and sig["entry"] and not sig["exit"]:
+                side = "long"                   # wejscie i wyjscie na tej samej swiecy = brak wejscia (bez "pily")
+            elif short_ok and sig["sentry"] and not sig["sexit"]:
+                side = "short"
+            if not side:
+                continue
+            available = min(buying_power, budget * self.lev - used)
+            target, price, sl_pct, tp_pct, meta = sym, float(sig["close"]), None, None, None
+            p = self.p
+            if self.lev_mode == "etf":
+                etf = pr["bull" if side == "long" else "bear"]
+                if not etf:
+                    continue
+                target, L = etf
+                if target not in bars or bars[target].empty:
+                    self.log(f"{sym}: sygnał {'wzrostu' if side == 'long' else 'spadku'}, ale brak notowań ETF-u "
+                             f"{target} — pomijam.", "WARNING")
+                    continue
+                price = float(bars[target]["close"].iloc[-1])
+                sl_pct = min(0.5, self.p["stop_loss_pct"] * abs(L))   # ruch spolki o X% = ok. |L|*X% ETF-u
+                tp_pct = self.p["take_profit_pct"] * abs(L)
+                p = dict(self.p, stop_loss_pct=sl_pct)
+                meta, side = sym, "long"                               # ETF zawsze kupujemy
+            notional = sized_notional(budget, p, available)
             prob = sig.get("ml_prob")
             prob = None if prob is None or pd.isna(prob) else float(prob)
             scale = ml.size_scale(prob, self.p, self.cost) if self.use_ml else 1.0
             notional *= scale
-            price = float(sig["close"])
             try:
-                spent = execute(sym, price, notional)
+                spent = execute(target, price, notional, side, sl_pct, tp_pct, meta)
                 if spent and prob is not None:
                     self.log(f"{sym}: pewność modelu ML {prob:.0%} (próg {ml.threshold(self.p, self.cost):.0%})"
                              + (f", pozycja {scale:.0%} standardowej" if self.p.get("ml_sizing") else ""))
@@ -400,7 +571,7 @@ class BotRunner(threading.Thread):
                     used += spent
                     buying_power -= spent
             except Exception as e:
-                self.log(f"{sym}: zlecenie odrzucone ({e})", "WARNING")
+                self.log(f"{target}: zlecenie odrzucone ({e})", "WARNING")
 
     def position_exits(self, mine, bars):
         """Stop kroczacy, stop na wejsciu i limit czasu - pilnuje ich bot (twardy SL zostaje na serwerze).
@@ -417,19 +588,34 @@ class BotRunner(threading.Thread):
             st = states.get(s)
             if not st:
                 continue
-            sym = self.by_norm[s]
+            sym = self.by_norm.get(s, pos["symbol"])
             price = float(pos["price"])
-            peak = max(st.get("peak") or st["entry"], price)
-            if peak > (st.get("peak") or 0):
-                self.db.set_peak(self.id, s, peak)
+            short = self.is_short(st, pos)
+            if short:                                  # dla krotkiej pozycji "szczyt" = najnizsza cena od wejscia
+                best = min(st.get("peak") or st["entry"], price)
+                if best < (st.get("peak") or float("inf")):
+                    self.db.set_peak(self.id, s, best)
+            else:
+                best = max(st.get("peak") or st["entry"], price)
+                if best > (st.get("peak") or 0):
+                    self.db.set_peak(self.id, s, best)
             reason = None
             if trail and sym in bars and len(bars[sym]) > 15:
                 a = float(atr_series(bars[sym], 14).iloc[-1])
-                level = peak - trail * a
-                if a == a and level > (st["sl"] or 0) and price <= level:
-                    reason = f"stop kroczący ({fp(level)})"
-            if not reason and be and peak >= st["entry"] * (1 + be) and price <= st["entry"] * (1 + 2 * self.cost):
-                reason = "stop na wejściu"
+                if a == a:
+                    if short:
+                        level = best + trail * a
+                        if level < (st["sl"] or float("inf")) and price >= level:
+                            reason = f"stop kroczący ({fp(level)})"
+                    else:
+                        level = best - trail * a
+                        if level > (st["sl"] or 0) and price <= level:
+                            reason = f"stop kroczący ({fp(level)})"
+            if not reason and be:
+                if short and best <= st["entry"] * (1 - be) and price >= st["entry"] * (1 - 2 * self.cost):
+                    reason = "stop na wejściu"
+                if not short and best >= st["entry"] * (1 + be) and price <= st["entry"] * (1 + 2 * self.cost):
+                    reason = "stop na wejściu"
             if not reason and hold and now - datetime.fromisoformat(st["opened_at"]) >= timedelta(days=hold):
                 reason = f"limit czasu ({hold} dni)"
             if reason:
@@ -460,12 +646,21 @@ class BotRunner(threading.Thread):
         self.cross = ml.cross_section(bars) if self.use_ml else None
         done = self.guard_fractional(mine)
         done |= set(self.position_exits({s: p for s, p in mine.items() if s not in done}, bars) or ())
+        states = self.db.pos_states(self.id)
         for s, pos in mine.items():
             if s in done:
                 continue
-            sym = self.by_norm[s]
+            sym = self.by_norm.get(s, pos["symbol"])
+            st = states.get(s) or {}
+            if sym in self.etf_of:                     # ETF lewarowany: wyjscie wg sygnalu na spolce bazowej
+                u, side, _ = self.etf_of[sym]
+                u = st.get("meta") or u
+                sig = self.signals(bars[u], u) if u in bars else None
+                if sig is not None and (sig["sexit"] if side == "bear" else sig["exit"]):
+                    self.close(sym, f"sygnał wyjścia ({u})", pos)
+                continue
             sig = self.signals(bars[sym], sym) if sym in bars else None
-            if sig is not None and sig["exit"]:
+            if sig is not None and (sig["sexit"] if self.is_short(st, pos) else sig["exit"]):
                 self.close(sym, "sygnal wyjscia", pos)
 
         positions = self.broker.positions()
@@ -473,11 +668,29 @@ class BotRunner(threading.Thread):
         if clock.get("session_min", 390) - to_close < self.p.get("no_entry_after_open_min", 0):
             return
         overnight = not flatten
+        cur = acct.get("currency", "USD")
 
-        def execute(sym, price, notional):
+        def execute(sym, price, notional, side="long", sl_pct=None, tp_pct=None, meta=None):
             fx = self.broker.fx_for(sym) if hasattr(self.broker, "fx_for") else 1.0   # cena w walucie konta
+            sl_pct = sl_pct or self.p["stop_loss_pct"]
+            tp_pct = tp_pct or self.p["take_profit_pct"]
+            why = f"sygnał na {meta}" if meta else "sygnal wejscia"
+            if side == "short":
+                qty = int(notional // (price * fx))
+                if qty < 1:
+                    self.log(f"{sym}: sygnał spadku, ale budżet ({notional:,.2f}) nie wystarcza na 1 akcję "
+                             f"({price * fx:,.2f}) — krótka sprzedaż tylko w całych akcjach.")
+                    return 0
+                sl = price * (1 + sl_pct)
+                tp = price * (1 - tp_pct)
+                self.broker.short_bracket(sym, qty, sl, tp, overnight)
+                self.db.set_pos_state(self.id, norm(sym), price, qty, sl, tp, side="short", meta=meta)
+                self.db.add_trade(self.id, sym, "SHORT", qty, price, "sygnał spadku")
+                self.log(f"SPRZEDAŻ KRÓTKA (gra na spadek) {sym} x{qty} ~{price:,.4g} | SL {sl:,.4g} (nad ceną) | "
+                         f"TP {tp:,.4g} | ~{qty * price * fx:,.0f} {cur}")
+                return qty * price * fx
             if self.p.get("fractional_shares") and getattr(self.broker, "supports_fractional", False):
-                return execute_fractional(sym, price, notional, fx)
+                return execute_fractional(sym, price, notional, fx, sl_pct, tp_pct, meta, why)
             qty = int(notional // (price * fx))
             if qty < 1:
                 hint = (" Włącz „Ułamki akcji”, żeby kupić część akcji za tę kwotę."
@@ -485,28 +698,28 @@ class BotRunner(threading.Thread):
                 self.log(f"{sym}: sygnal kupna, ale budzet ({notional:,.2f}) nie wystarcza na 1 akcje "
                          f"({price * fx:,.2f}).{hint}")
                 return 0
-            sl = price * (1 - self.p["stop_loss_pct"])
-            tp = price * (1 + self.p["take_profit_pct"])
+            sl = price * (1 - sl_pct)
+            tp = price * (1 + tp_pct)
             self.broker.buy_bracket(sym, qty, sl, tp, overnight)
-            self.db.set_pos_state(self.id, norm(sym), price, qty, sl, tp)
-            self.db.add_trade(self.id, sym, "BUY", qty, price, "sygnal wejscia")
-            cur = acct.get("currency", "USD")
-            self.log(f"KUPNO {sym} x{qty} ~{price:,.4g} | SL {sl:,.4g} | TP {tp:,.4g} | ~{qty * price * fx:,.0f} {cur}")
+            self.db.set_pos_state(self.id, norm(sym), price, qty, sl, tp, meta=meta)
+            self.db.add_trade(self.id, sym, "BUY", qty, price, why)
+            self.log(f"KUPNO {sym} x{qty} ~{price:,.4g} | SL {sl:,.4g} | TP {tp:,.4g} | ~{qty * price * fx:,.0f} {cur}"
+                     + (f" | ETF z dźwignią, sygnał na {meta}" if meta else ""))
             return qty * price * fx
 
-        def execute_fractional(sym, price, notional, fx):
+        def execute_fractional(sym, price, notional, fx, sl_pct, tp_pct, meta, why):
             """Zakup za kwote (ulamek akcji). Stop-loss i take-profit pilnuje bot (patrz guard_fractional)."""
             fill, qty = self.broker.buy_fractional(sym, notional / fx)
-            sl = fill * (1 - self.p["stop_loss_pct"])
-            tp = fill * (1 + self.p["take_profit_pct"])
-            self.db.set_pos_state(self.id, norm(sym), fill, qty, sl, tp)
-            self.db.add_trade(self.id, sym, "BUY", qty, fill, "sygnal wejscia (za kwotę)")
-            cur = acct.get("currency", "USD")
+            sl = fill * (1 - sl_pct)
+            tp = fill * (1 + tp_pct)
+            self.db.set_pos_state(self.id, norm(sym), fill, qty, sl, tp, meta=meta)
+            self.db.add_trade(self.id, sym, "BUY", qty, fill, why + " (za kwotę)")
             self.log(f"KUPNO {sym} x{qty:.6g} za ~{qty * fill * fx:,.2f} {cur} (ulamek akcji) ~{fill:,.4g} | "
-                     f"SL {sl:,.4g} | TP {tp:,.4g} (pilnuje bot)")
+                     f"SL {sl:,.4g} | TP {tp:,.4g} (pilnuje bot)" + (f" | ETF z dźwignią, sygnał na {meta}" if meta else ""))
             return qty * fill * fx
 
-        self.entries(bars, positions, mine, budget, acct["buying_power"], execute)
+        bp = acct.get("margin_buying_power", acct["buying_power"]) if self.lev_mode == "margin" else acct["buying_power"]
+        self.entries(bars, positions, mine, budget, bp, execute)
         self.lab_step(bars)
 
     def guard_fractional(self, mine):
@@ -519,6 +732,8 @@ class BotRunner(threading.Thread):
             if not st or abs(pos["qty"] - round(pos["qty"])) < 1e-9:
                 continue                                     # cale akcje maja SL/TP na serwerze (bracket)
             sym = self.by_norm.get(s, pos["symbol"])
+            if self.is_short(st, pos):
+                continue
             if st["sl"] and pos["price"] <= st["sl"]:
                 self.close(sym, "stop-loss (pilnowany przez bota)", pos)
                 done.add(s)
@@ -532,10 +747,25 @@ class BotRunner(threading.Thread):
         """Kazda pozycja krypto bota musi miec stop-limit na serwerze."""
         states = self.db.pos_states(self.id)
         for s, pos in mine.items():
-            sym = self.by_norm[s]
-            has_stop = any(o["side"] == "sell" for o in self.broker.open_orders(sym))
+            sym = self.by_norm.get(s, pos["symbol"])
             st = states.get(s)
+            short = self.is_short(st, pos)
             entry = st["entry"] if st else pos["avg_entry"]
+            if short or pos.get("margin"):
+                sl = st["sl"] if st else entry * ((1 + self.p["stop_loss_pct"]) if short else (1 - self.p["stop_loss_pct"]))
+                tp = st["tp"] if st else entry * ((1 - self.p["take_profit_pct"]) if short else (1 + self.p["take_profit_pct"]))
+                closing = "buy" if short else "sell"
+                has_stop = any(o["side"] == closing for o in self.broker.open_orders(sym))
+                if not has_stop and sym not in getattr(self.broker, "soft_stops", ()):
+                    try:
+                        how = self.broker.margin_stop(sym, closing, abs(pos["qty"]), sl)
+                        self.log(f"{sym}: stop ochronny {fp(sl)} " + ("(pilnuje bot)" if how == "soft" else "postawiony"))
+                    except Exception as e:
+                        self.log(f"{sym}: NIE udalo sie postawic stopu ({e})", "ERROR")
+                if not st:
+                    self.db.set_pos_state(self.id, s, entry, abs(pos["qty"]), sl, tp, side="short" if short else "long")
+                continue
+            has_stop = any(o["side"] == "sell" for o in self.broker.open_orders(sym))
             sl = entry * (1 - self.p["stop_loss_pct"])
             tp = entry * (1 + self.p["take_profit_pct"])
             if not has_stop and sym not in getattr(self.broker, "soft_stops", ()):
@@ -561,24 +791,45 @@ class BotRunner(threading.Thread):
         for s, pos in mine.items():
             if s in done:
                 continue
-            sym = self.by_norm[s]
+            sym = self.by_norm.get(s, pos["symbol"])
             st = states.get(s)
-            if st and st["sl"] and pos["price"] <= st["sl"] and sym in getattr(self.broker, "soft_stops", ()):
+            short = self.is_short(st, pos)
+            soft = sym in getattr(self.broker, "soft_stops", ())
+            if st and st["sl"] and soft and (pos["price"] >= st["sl"] if short else pos["price"] <= st["sl"]):
                 self.close(sym, "stop-loss (pilnowany przez bota)", pos)
                 continue
-            if st and st["tp"] and pos["price"] >= st["tp"]:
+            if st and st["tp"] and (pos["price"] <= st["tp"] if short else pos["price"] >= st["tp"]):
                 self.close(sym, "take-profit", pos)
                 continue
             sig = self.signals(bars[sym], sym) if sym in bars else None
-            if sig is not None and sig["exit"]:
+            if sig is not None and (sig["sexit"] if short else sig["exit"]):
                 self.close(sym, "sygnal wyjscia", pos)
 
         positions = self.broker.positions()
         mine = self.mine(positions)
+        quote = getattr(self.broker, "quote", "USD")
 
-        def execute(sym, price, notional):
+        def execute(sym, price, notional, side="long", sl_pct=None, tp_pct=None, meta=None):
             if notional < 10:
                 return 0
+            if self.lev_mode == "margin":
+                fill, qty = self.broker.margin_open(sym, "buy" if side == "long" else "sell", notional, self.lev)
+                short = side == "short"
+                sl = fill * ((1 + self.p["stop_loss_pct"]) if short else (1 - self.p["stop_loss_pct"]))
+                tp = fill * ((1 - self.p["take_profit_pct"]) if short else (1 + self.p["take_profit_pct"]))
+                self.db.set_pos_state(self.id, norm(sym), fill, qty, sl, tp, side=side)
+                self.db.add_trade(self.id, sym, "SHORT" if short else "BUY", qty, fill,
+                                  "sygnał spadku" if short else "sygnal wejscia")
+                try:
+                    how = self.broker.margin_stop(sym, "buy" if short else "sell", qty, sl)
+                except Exception as e:
+                    how = "error"
+                    self.log(f"{sym}: NIE udalo sie postawic stopu ({e}) - ponowie w nastepnym cyklu", "ERROR")
+                where = {"soft": "bot", "error": "BRAK"}.get(how, "serwer")
+                self.log(f"{'SPRZEDAŻ KRÓTKA (gra na spadek)' if short else 'KUPNO na marginesie'} {sym} x{qty:.6g} "
+                         f"~{fp(fill)} | dźwignia {self.lev:g}× | SL {fp(sl)} ({where}) | TP {fp(tp)} (bot) | "
+                         f"wartość ~{qty * fill:,.0f} {quote}")
+                return qty * fill
             fill, qty = self.broker.buy_notional(sym, notional)
             sl = fill * (1 - self.p["stop_loss_pct"])
             tp = fill * (1 + self.p["take_profit_pct"])
@@ -594,7 +845,10 @@ class BotRunner(threading.Thread):
                      f"~{qty * fill:,.0f} {getattr(self.broker, 'quote', 'USD')}")
             return qty * fill
 
-        self.entries(bars, positions, mine, budget, acct["crypto_buying_power"], execute)
+        bp = acct["crypto_buying_power"]
+        if self.lev_mode == "margin":
+            bp = acct.get("margin_buying_power") or acct["crypto_buying_power"] * self.lev
+        self.entries(bars, positions, mine, budget, bp, execute)
         self.lab_step(bars)
 
     def lab_step(self, bars):
@@ -609,6 +863,15 @@ class BotRunner(threading.Thread):
                 self.log(f"Laboratorium: błąd ({e}) - handel działa normalnie", "WARNING")
                 log.exception("laboratorium")
 
+    def ibkr_weekend(self):
+        """Bot na IBKR w weekend (bramka bez połączenia to wtedy norma) - bez powiadomień o błędach."""
+        try:
+            from . import gateway
+            acc = ACCOUNTS.get(self.bot["account"])
+            return bool(acc and acc.type == "ibkr" and gateway.settings().get("weekend_pause", True) and gateway.weekend())
+        except Exception:
+            return False
+
     # ---------------------------------------------------------- petla
     def run(self):
         self.log(f"Start | konto {self.bot['account']} | {self.strategy.name} | {self.p['timeframe']} | "
@@ -619,9 +882,11 @@ class BotRunner(threading.Thread):
                 if self.errors >= 3:
                     self.log(f"Połączenie wróciło po {self.errors} nieudanych cyklach - bot pracuje normalnie.")
                     self.db.update_bot(self.id, last_error=None)
+                if self.errors >= 3 and getattr(self, "err_notified", False):
                     notify.send(f"✅ {self.bot['name']}: znowu działa (po {self.errors} nieudanych próbach).",
                                 "errors", key=f"err-{self.id}")
                 self.errors = 0
+                self.err_notified = False
             except Exception as e:
                 # Bez trwalego zatrzymania: przerwa w internecie albo awaria API brokera nie wylacza bota.
                 # Kolejne proby coraz rzadziej (do 15 min); pozycje i tak maja stopy u brokera.
@@ -632,6 +897,8 @@ class BotRunner(threading.Thread):
                     log.exception("szczegoly bledu")
                 if self.errors == 3:
                     self.db.update_bot(self.id, last_error=str(e)[:300])
+                if self.errors == 3 and not self.ibkr_weekend():
+                    self.err_notified = True
                     notify.send(f"⚠️ {self.bot['name']}: 3 nieudane cykle z rzędu ({str(e)[:150]}). "
                                 f"Bot ponawia próby co kilka minut, pozycje mają stopy u brokera.",
                                 "errors", key=f"err-{self.id}")

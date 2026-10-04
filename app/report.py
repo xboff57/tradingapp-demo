@@ -247,9 +247,10 @@ def findings(r, m, p, cfg, trades):
                           f"(stop {p['stop_loss_pct'] * 100:.1f}%).",
                           "Stop może być za ciasny względem zmienności — sprawdź szerszy stop albo ostrzejszy "
                           "filtr wejścia.", "sl_wider"))
+    special = cfg.get("strategy") in ("grid", "dca")
     tp = exits.get("take-profit")
     tp_share = (tp["trades"] if tp else 0) / n * 100 if n else 0
-    if n >= 20 and tp_share < 5:
+    if n >= 20 and tp_share < 5 and not special:
         out.append(_f("info", "Take-profit prawie nie działa",
                       f"Tylko {tp_share:.0f}% transakcji kończy się na TP ({p['take_profit_pct'] * 100:.1f}%). "
                       "Pozycje zamyka głównie sygnał wyjścia albo stop.",
@@ -283,8 +284,10 @@ def findings(r, m, p, cfg, trades):
         out.append(_f("bad", "Obsunięcie duże względem zysku",
                       f"Maks. obsunięcie {dd:.1f}% przy zwrocie {m['total_return_pct']:+.1f}%. "
                       f"Najdłużej pod wodą: {r['drawdown']['longest_days']} dni.",
-                      f"Zmniejsz ryzyko na transakcję (teraz {p['risk_per_trade_pct'] * 100:.1f}%) albo liczbę "
-                      "jednoczesnych pozycji.", "fewer_positions"))
+                      ("Ustaw stop (siatka: pod dolną krawędzią, DCA: pod średnią) albo mniejszy budżet / mniej "
+                       "dokupień." if special else
+                       f"Zmniejsz ryzyko na transakcję (teraz {p['risk_per_trade_pct'] * 100:.1f}%) albo liczbę "
+                       "jednoczesnych pozycji."), None if special else "fewer_positions"))
 
     ex = r.get("external") or {}
     if ex.get("active"):

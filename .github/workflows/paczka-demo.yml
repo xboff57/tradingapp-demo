@@ -1,6 +1,8 @@
-# Buduje przenośną paczkę demo dla Windows (kod + Python z bibliotekami + plik .bat),
-# uruchamia ją na próbę i publikuje jako Release „v<VERSION>”.
-name: Paczka demo
+# Buduje dwie rzeczy dla Windows i publikuje je jako Release „v<VERSION>”:
+#   TradingApp-Setup-<VERSION>.exe  — instalator pełnej wersji (Inno Setup), z Pythonem i bibliotekami w środku
+#   TradingApp-Demo.zip             — przenośna wersja demonstracyjna (bez instalacji)
+# Obie paczki są przed publikacją uruchamiane na próbę tak, jak u odbiorcy.
+name: Instalator i paczka demo
 
 on:
   push:
@@ -14,7 +16,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -22,25 +24,86 @@ jobs:
         with:
           python-version: "3.12.10"
 
-      - name: Zbuduj paczkę
+      - name: Python z bibliotekami (wspólny dla obu paczek)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $PV = "3.12.10"
-          $O = "TradingApp-Demo"
-          New-Item -ItemType Directory $O | Out-Null
+          New-Item -ItemType Directory build | Out-Null
           Invoke-WebRequest "https://www.python.org/ftp/python/$PV/python-$PV-embed-amd64.zip" -OutFile py.zip
-          Expand-Archive py.zip "$O\python"
-          # Lib\site-packages = biblioteki, ".." = folder paczki (tam jest app\)
-          Set-Content "$O\python\python312._pth" "python312.zip`r`n.`r`nLib\site-packages`r`n..`r`nimport site" -Encoding ascii
-          python -m pip install --disable-pip-version-check --no-compile --only-binary=:all: --target "$O\python\Lib\site-packages" -r requirements.txt
-          Get-ChildItem "$O\python\Lib\site-packages" -Recurse -Directory -Filter tests | Remove-Item -Recurse -Force
-          Copy-Item app "$O\app" -Recurse
-          Copy-Item demo\* $O
-          Copy-Item VERSION, THIRD_PARTY_NOTICES.md $O
-          "{0:N0} MB" -f ((Get-ChildItem $O -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+          Expand-Archive py.zip "build\python"
+          # Lib\site-packages = biblioteki, ".." = folder programu (tam jest app\)
+          Set-Content "build\python\python312._pth" "python312.zip`r`n.`r`nLib\site-packages`r`n..`r`nimport site" -Encoding ascii
+          python -m pip install --disable-pip-version-check --no-compile --only-binary=:all: --target "build\python\Lib\site-packages" -r requirements.txt
+          Get-ChildItem "build\python\Lib\site-packages" -Recurse -Directory -Filter tests | Remove-Item -Recurse -Force
 
-      - name: Próbne uruchomienie (tak jak u odbiorcy, przez plik .bat)
+      - name: Złóż pełną wersję i demo
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $F = "build\TradingApp"
+          New-Item -ItemType Directory $F | Out-Null
+          Copy-Item build\python "$F\python" -Recurse
+          Copy-Item app "$F\app" -Recurse
+          Copy-Item installer\launcher.pyw, installer\INSTRUKCJA.html, installer\tradingapp.ico, VERSION, THIRD_PARTY_NOTICES.md, CHANGELOG.md $F
+          $D = "TradingApp-Demo"
+          New-Item -ItemType Directory $D | Out-Null
+          Copy-Item build\python "$D\python" -Recurse
+          Copy-Item app "$D\app" -Recurse
+          Copy-Item demo\* $D
+          Copy-Item VERSION, THIRD_PARTY_NOTICES.md $D
+          "pełna: {0:N0} MB, demo: {1:N0} MB" -f ((Get-ChildItem $F -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), ((Get-ChildItem $D -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+
+      - name: Zbuduj instalator (Inno Setup)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $v = (Get-Content VERSION -Raw).Trim()
+          & $iscc "/DAppVersion=$v" "/DSrc=..\build\TradingApp" installer\TradingApp.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC: błąd $LASTEXITCODE" }
+          Get-ChildItem dist
+
+      - name: Próba instalatora (instalacja, kreator hasła, panel, zatrzymanie, odinstalowanie)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $v = (Get-Content VERSION -Raw).Trim()
+          $setup = "dist\TradingApp-Setup-$v.exe"
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/MERGETASKS=!autostart,!nosleep,!desktopicon", "/LOG=install.log" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 40; throw "Instalacja: kod $($p.ExitCode)" }
+          $app = Join-Path $env:LOCALAPPDATA "Programs\TradingApp"
+          $data = Join-Path $env:LOCALAPPDATA "TradingApp\dane"
+          if (-not (Test-Path "$app\launcher.pyw")) { throw "Brak plików po instalacji" }
+          if (-not (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\TradingApp\TradingApp.lnk")) { throw "Brak skrótu w menu Start" }
+          Start-Process "$app\python\pythonw.exe" -ArgumentList "`"$app\launcher.pyw`"", "--tlo" -WorkingDirectory $app
+          $s = $null
+          for ($i = 0; $i -lt 90; $i++) { Start-Sleep 2; try { $s = Invoke-RestMethod http://127.0.0.1:8420/api/session; break } catch {} }
+          if (-not $s) { Get-Content "$data\*.log" -Tail 40 -ErrorAction SilentlyContinue; throw "Panel nie wstał" }
+          "sesja: $($s | ConvertTo-Json -Compress)"
+          if (-not $s.setup -or -not $s.installed) { throw "Brak kreatora pierwszego uruchomienia" }
+          $body = @{ username = "test"; password = "Proba-Instalatora-123" } | ConvertTo-Json
+          Invoke-RestMethod http://127.0.0.1:8420/api/setup -Method Post -Body $body -ContentType "application/json" -SessionVariable web | Out-Null
+          $ov = Invoke-RestMethod http://127.0.0.1:8420/api/overview -WebSession $web
+          $gal = Invoke-RestMethod http://127.0.0.1:8420/api/gallery -WebSession $web
+          "konta: $($ov.accounts.Count), galeria: $($gal.items.Count)"
+          if ($ov.accounts.Count -lt 1 -or $gal.items.Count -lt 5) { throw "Panel odpowiada niepoprawnie" }
+          if (-not (Test-Path "$data\.env")) { throw "Brak pliku .env w folderze danych" }
+          $listen = Get-NetTCPConnection -LocalPort 8420 -State Listen
+          if ($listen.LocalAddress -ne "127.0.0.1") { throw "Panel słucha na $($listen.LocalAddress) zamiast 127.0.0.1" }
+          & "$app\python\python.exe" "$app\launcher.pyw" --stop
+          Start-Sleep 3
+          try { Invoke-RestMethod http://127.0.0.1:8420/api/session | Out-Null; throw "Panel działa po --stop" } catch { if ($_.Exception.Message -like "*po --stop*") { throw } }
+          "zatrzymano"
+          Get-Content "$data\launcher.log"
+          $p = Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru -Wait
+          Start-Sleep 3
+          if (Test-Path "$app\launcher.pyw") { throw "Odinstalowanie nie usunęło programu" }
+          if (-not (Test-Path "$data\tradingapp.sqlite")) { throw "Odinstalowanie usunęło dane użytkownika" }
+          "instalator OK"
+
+      - name: Próba paczki demo (przez plik .bat)
         shell: pwsh
         run: |
           $O = "TradingApp-Demo"
@@ -59,14 +122,10 @@ jobs:
           Start-Sleep 3
           Get-Content demo_run.log -Tail 30 -ErrorAction SilentlyContinue
           if ($state -ne "done" -or $ov.bots.Count -lt 3 -or $page -ne 200) { throw "Próbne uruchomienie nie powiodło się" }
-          # czysta paczka: bez danych z próby
           Remove-Item "$O\_test.cmd" -Force
           Remove-Item "$O\dane" -Recurse -Force -ErrorAction SilentlyContinue
           Get-ChildItem "$O\app" -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
-
-      - name: Spakuj
-        shell: pwsh
-        run: Compress-Archive -Path TradingApp-Demo -DestinationPath TradingApp-Demo.zip -CompressionLevel Optimal
+          Compress-Archive -Path $O -DestinationPath TradingApp-Demo.zip -CompressionLevel Optimal
 
       - name: Opublikuj Release
         shell: pwsh
@@ -74,10 +133,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = (Get-Content VERSION -Raw).Trim()
-          $notes = "Przenośna wersja demonstracyjna TradingApp $v dla Windows 10/11. Pobierz TradingApp-Demo.zip, rozpakuj i kliknij dwa razy 'Uruchom TradingApp Demo.bat'. Wszystko działa na koncie symulowanym, bez prawdziwych pieniędzy."
+          $setup = "dist\TradingApp-Setup-$v.exe"
+          $h1 = (Get-FileHash $setup -Algorithm SHA256).Hash
+          $h2 = (Get-FileHash TradingApp-Demo.zip -Algorithm SHA256).Hash
+          $notes = @"
+          ## TradingApp $v dla Windows 10/11 (64-bit)
+
+          | Plik | Co to jest |
+          |---|---|
+          | **TradingApp-Setup-$v.exe** | **pełna wersja** — instalator. Własne konta (Alpaca, Kraken, IBKR), boty, galeria strategii, powiadomienia. Instrukcja: [INSTRUKCJA.md](https://github.com/xboff57/tradingapp-demo/blob/main/installer/INSTRUKCJA.md) |
+          | **TradingApp-Demo.zip** | **wersja demonstracyjna** — rozpakuj i kliknij ``Uruchom TradingApp Demo.bat``. Dane symulowane, bez kont i bez instalacji |
+
+          Windows może pokazać „System Windows ochronił ten komputer” (program bez płatnego certyfikatu) — **Więcej informacji → Uruchom mimo to**.
+          Aktualizacja: uruchom nowszy instalator — boty, konta i historia zostają.
+
+          Sumy kontrolne SHA256:
+          - ``TradingApp-Setup-$v.exe``: ``$h1``
+          - ``TradingApp-Demo.zip``: ``$h2``
+
+          To narzędzie, nie porada inwestycyjna. Zaczynaj na koncie papierowym.
+          "@
+          $notes = ($notes -split "`n" | ForEach-Object { $_ -replace '^          ', '' }) -join "`n"
           gh release view "v$v" 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "v$v" TradingApp-Demo.zip --clobber
+            gh release upload "v$v" $setup TradingApp-Demo.zip --clobber
+            gh release edit "v$v" --notes $notes --title "TradingApp $v"
           } else {
-            gh release create "v$v" TradingApp-Demo.zip --title "TradingApp Demo $v" --notes $notes --latest
+            gh release create "v$v" $setup TradingApp-Demo.zip --title "TradingApp $v" --notes $notes --latest
           }

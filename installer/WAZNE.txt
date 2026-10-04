@@ -1,0 +1,30 @@
+﻿TradingApp — przeczytaj przed instalacją
+
+1. To narzędzie, nie porada inwestycyjna.
+   TradingApp wykonuje strategie, które sam wybierasz i ustawiasz. Autor nie zna Twojej sytuacji
+   finansowej i niczego Ci nie rekomenduje. Wyniki backtestów i galerii strategii pochodzą z danych
+   historycznych i nie gwarantują przyszłych zysków.
+
+2. Możesz stracić pieniądze.
+   Handel akcjami, ETF-ami i kryptowalutami wiąże się z ryzykiem utraty części albo całości wpłaconych
+   środków. Dźwignia, krótka sprzedaż i ETF-y lewarowane mogą przynieść stratę większą niż wkład.
+   Inwestuj tylko pieniądze, których utratę możesz udźwignąć.
+
+3. Zaczynaj na papierze.
+   Każdy bot najpierw na koncie symulowanym albo papierowym (Alpaca Paper, Kraken „na niby”, IBKR paper)
+   przez co najmniej kilka tygodni. Prawdziwe pieniądze — dopiero gdy rozumiesz, co bot robi.
+
+4. Bezpieczeństwo kluczy.
+   Klucze API brokerów i giełd twórz ZAWSZE bez prawa wypłaty środków. Klucze są przechowywane tylko na
+   tym komputerze (zaszyfrowane). Nie udostępniaj panelu w internecie przez przekierowanie portu —
+   do dostępu z telefonu użyj Tailscale.
+
+5. Komputer musi działać.
+   Boty działają tylko wtedy, gdy ten komputer jest włączony i podłączony do internetu. Stop-loss
+   jest stawiany u brokera, ale część wyjść (siatka, uśrednianie, trailing) pilnuje sam program.
+
+6. Oprogramowanie dostarczane jest „tak jak jest” (AS IS), bez jakichkolwiek gwarancji. Autor nie
+   odpowiada za straty wynikające z jego użycia, błędów programu, brokera, giełdy ani połączenia.
+   Licencje bibliotek innych firm: THIRD_PARTY_NOTICES.md w folderze programu.
+
+Klikając „Akceptuję”, potwierdzasz, że rozumiesz powyższe ryzyka.

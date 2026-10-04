@@ -18,6 +18,8 @@
         <input id="login-user" name="username" autocomplete="username" spellcheck="false" autocapitalize="off"></label>
       <label class="field"><span>Hasło</span>
         <input id="login-pass" name="password" type="password" autocomplete="current-password" required></label>
+      <label class="field hidden" id="login-pass2-f"><span>Powtórz hasło</span>
+        <input id="login-pass2" type="password" autocomplete="new-password"></label>
     </div>
     <div id="login-step2" class="login-fields hidden">
       <label class="field"><span>Kod z aplikacji (6 cyfr)</span>
@@ -45,14 +47,17 @@
       <a href="#/reports" data-route="reports">Raporty</a>
       <a href="#/chart" data-route="chart">Wykresy</a>
       <div class="nav-group">Analiza</div>
+      <a href="#/gallery" data-route="gallery">Galeria strategii</a>
       <a href="#/backtests" data-route="backtests">Backtesty</a>
       <a href="#/signals" data-route="signals">Sygnały</a>
       <a href="#/radar" data-route="radar">Radar</a>
+      <a href="#/calendar" data-route="calendar">Kalendarz</a>
       <a href="#/ml" data-route="ml">ML <span id="ml-badge" class="nav-badge hidden"></span></a>
       <a href="#/lab" data-route="lab">Laboratorium <span id="lab-badge" class="nav-badge hidden"></span></a>
       <div class="nav-group">Ustawienia</div>
       <a href="#/accounts" data-route="accounts">Konta</a>
       <a href="#/gateway" data-route="gateway">Bramka IBKR <span id="gw-badge" class="nav-badge bad hidden"></span></a>
+      <a href="#/risk" data-route="risk">Ryzyko <span id="risk-badge" class="nav-badge hidden"></span></a>
       <a href="#/security" data-route="security">Logowanie</a>
       <a href="#/system" data-route="system">System</a>
     </nav>

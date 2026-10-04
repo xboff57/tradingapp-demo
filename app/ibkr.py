@@ -396,7 +396,7 @@ class IBKRBroker:
         f = lambda tag, default=0.0: float(vals.get(tag, (default, ""))[0] or default)
         eq = f("NetLiquidation")
         return {"equity": eq, "cash": f("TotalCashValue"), "buying_power": f("AvailableFunds", eq),
-                "crypto_buying_power": f("AvailableFunds", eq),
+                "crypto_buying_power": f("AvailableFunds", eq), "margin_buying_power": f("BuyingPower", eq),
                 "last_equity": f("PreviousDayEquityWithLoanValue", eq) or eq, "currency": self._base}
 
     def positions(self):
@@ -461,17 +461,27 @@ class IBKRBroker:
         self.conn.call(do)
 
     def buy_bracket(self, symbol, qty, stop, take, overnight):
+        return self._bracket(symbol, qty, stop, take, overnight, "BUY")
+
+    def short_bracket(self, symbol, qty, stop, take, overnight):
+        """Krótka sprzedaż: SELL + stop (BUY) nad ceną + TP (BUY) pod ceną. IBKR sam sprawdza, czy ma akcje do
+        pożyczenia — na GPW zwykle nie ma (zlecenie zostanie odrzucone z opisem)."""
+        return self._bracket(symbol, qty, stop, take, overnight, "SELL")
+
+    def _bracket(self, symbol, qty, stop, take, overnight, action):
         from ib_async import LimitOrder, MarketOrder, StopOrder
         c = self.contract(symbol)
         tif = "GTC" if overnight else "DAY"
-        sl = self.round_price(symbol, stop, down=True)
-        tp = self.round_price(symbol, take, down=False)
+        long = action == "BUY"
+        close = "SELL" if long else "BUY"
+        sl = self.round_price(symbol, stop, down=long)
+        tp = self.round_price(symbol, take, down=not long)
 
         def do(ib):
-            parent = MarketOrder("BUY", qty, orderId=ib.client.getReqId(), tif=tif, transmit=False)
-            tpo = LimitOrder("SELL", qty, tp, orderId=ib.client.getReqId(), parentId=parent.orderId, tif="GTC",
+            parent = MarketOrder(action, qty, orderId=ib.client.getReqId(), tif=tif, transmit=False)
+            tpo = LimitOrder(close, qty, tp, orderId=ib.client.getReqId(), parentId=parent.orderId, tif="GTC",
                              transmit=False)
-            slo = StopOrder("SELL", qty, sl, orderId=ib.client.getReqId(), parentId=parent.orderId, tif="GTC",
+            slo = StopOrder(close, qty, sl, orderId=ib.client.getReqId(), parentId=parent.orderId, tif="GTC",
                             transmit=True)
             oca = f"ta{parent.orderId}"
             for o in (tpo, slo):
@@ -496,6 +506,38 @@ class IBKRBroker:
             if st in ("Submitted", "PreSubmitted", "Filled"):
                 return
         raise IBKRError(f"IBKR nie potwierdził zlecenia {symbol} w 15 s - sprawdź bramkę")
+
+    def _market_qty(self, symbol, qty, action):
+        from ib_async import MarketOrder
+        c = self.contract(symbol)
+        qty = int(qty)
+        if qty < 1:
+            raise IBKRError(f"{symbol}: IBKR przyjmuje tylko całe akcje")
+
+        def do(ib):
+            o = MarketOrder(action, qty, orderId=ib.client.getReqId(), tif="DAY")
+            ib.placeOrder(c, o)
+            return o.orderId
+        oid = self.conn.call(do)
+        for _ in range(60):
+            time.sleep(0.5)
+            info = self.conn.call(lambda ib: [(t.orderStatus.status, t.orderStatus.avgFillPrice, t.orderStatus.filled,
+                                               [e.message for e in t.log if e.message])
+                                              for t in ib.trades() if t.order.orderId == oid])
+            if not info:
+                continue
+            st, px, filled, msgs = info[0]
+            if st in ("Cancelled", "ApiCancelled", "Inactive"):
+                raise IBKRError(f"IBKR odrzucił zlecenie {symbol}: {msgs[-1] if msgs else st}")
+            if st == "Filled":
+                return float(px), float(filled)
+        raise IBKRError(f"IBKR nie zrealizował zlecenia {symbol} w 30 s")
+
+    def buy_qty(self, symbol, qty):
+        return self._market_qty(symbol, qty, "BUY")
+
+    def sell_qty(self, symbol, qty):
+        return self._market_qty(symbol, qty, "SELL")
 
     def buy_notional(self, symbol, notional):
         raise IBKRError("Krypto przez IBKR nie jest obsługiwane — użyj Krakena albo Alpaki.")
