@@ -744,6 +744,13 @@ function botForm(bot = null, preset = null) {
   const root = $("#bot-form");
   const read = setupEditor(root, init);
   if (preset && !bot) $("#f-name").dataset.touched = "1";
+  $("#params-box").insertAdjacentHTML("beforebegin", `<div class="note hidden" id="acc-note" style="margin-bottom:12px"></div>`);
+  ACC_EQ = null;                                   // świeży kapitał kont przy każdym otwarciu formularza
+  const adapt = () => adaptToAccount(root, !bot);
+  $("#f-account").addEventListener("change", adapt);
+  $("#f-market").addEventListener("change", () => setTimeout(adapt, 0));
+  root.addEventListener("input", e => { if (e.target.dataset?.key === "allocation_pct" || e.target.dataset?.key === "max_positions") accountNote(root); });
+  adapt();
   $("#m-close").onclick = $("#m-cancel").onclick = closeModal;
   root.onsubmit = async e => {
     e.preventDefault();
@@ -804,7 +811,12 @@ async function renderBot(id) {
     <p class="muted small" style="margin-top:12px">Symbole: ${esc(p.symbols.join(", "))}</p>`;
 
   const act = async (fn, msg) => { try { await fn(); toast(msg); route(); } catch (e) { toast(e.message, true); } };
-  $("#b-start") && ($("#b-start").onclick = () => act(() => api("POST", `/api/bots/${id}/start`), "Bot uruchomiony"));
+  $("#b-start") && ($("#b-start").onclick = () => {
+    const a = SCHEMA.accounts.find(x => x.name === b.account);
+    if (a && isReal(a) && !confirmBox(`Ten bot będzie handlował PRAWDZIWYMI PIENIĘDZMI na koncie „${a.name}”` +
+        `${a.exchange ? ` (${a.exchange})` : ""}. Uruchomić?`)) return;
+    act(() => api("POST", `/api/bots/${id}/start`), "Bot uruchomiony");
+  });
   $("#b-stop") && ($("#b-stop").onclick = () => act(() => api("POST", `/api/bots/${id}/stop`), "Bot zatrzymany — pozycje zostają ze stopami na serwerze"));
   $("#b-stopclose") && ($("#b-stopclose").onclick = () => {
     if (confirmBox("Zatrzymać bota i zamknąć wszystkie jego pozycje po cenie rynkowej?"))
@@ -1686,8 +1698,12 @@ async function renderTrades() {
     <div class="page-head"><h1>Transakcje</h1><div class="actions">
       <select id="t-bot" style="width:auto"><option value="">Wszystkie boty</option>
         ${ov.bots.map(b => `<option value="${b.id}">${esc(b.name)}</option>`).join("")}</select>
-      <button class="btn" id="t-csv">Eksport CSV</button></div></div>
+      <button class="btn" id="t-csv">Eksport CSV</button>
+      <button class="btn primary" id="t-manual">Zlecenie ręczne</button></div></div>
+    <div class="card" id="t-manual-list" style="margin-bottom:14px"></div>
     <div class="card table-wrap" id="t-table"></div>`;
+  $("#t-manual").onclick = () => orderTicket("");
+  drawManualOrders();
   const draw = () => {
     const f = $("#t-bot").value;
     const list = f ? rows.filter(r => String(r.bot_id) === f) : rows;
@@ -2094,7 +2110,10 @@ function coneChart(canvas, d, last) {
 
 // ------------------------------------------------------------------ LABORATORIUM
 async function renderLab() {
-  view.innerHTML = `<div class="page-head"><h1>Laboratorium wariantów</h1></div><div id="lab-body" class="stack"></div>`;
+  view.innerHTML = `<div class="page-head"><h1>Laboratorium wariantów</h1></div>
+    <div class="card" id="lev-study" style="margin-bottom:14px"></div><div id="lab-body" class="stack"></div>`;
+  await drawLevStudy();
+  every(15000, () => { if (drawLevStudy.running) drawLevStudy(); });
   const draw = async () => {
     const d = await api("GET", "/api/lab");
     if (!d.bots.length) {
@@ -2172,6 +2191,7 @@ async function renderAccounts() {
         <dt>Boty</dt><dd>${a.bots.length ? esc(a.bots.join(", ")) : '<span class="muted">brak</span>'}</dd>
       </dl>
       <div class="acc-actions">
+        <button class="btn small" data-hold="${esc(a.name)}">Portfel</button>
         <button class="btn small" data-test="${esc(a.name)}">Sprawdź połączenie</button>
         ${a.source === "panel" ? `<button class="btn small" data-edit="${esc(a.name)}">Zmień</button>
           <button class="btn small danger" data-del="${esc(a.name)}" ${a.bots.length ? "disabled title='Najpierw usuń boty tego konta'" : ""}>Usuń</button>` : ""}
@@ -2188,6 +2208,7 @@ async function renderAccounts() {
       Panel nigdy nie pokazuje kluczy z powrotem. Dodanie, zmiana i usunięcie konta wymagają hasła do panelu.
       Konta z pliku <span class="mono">.env</span> zmieniasz w pliku.</p>`;
   $("#acc-add").onclick = () => accountForm(d);
+  $$("[data-hold]").forEach(b => b.onclick = () => holdingsModal(b.dataset.hold));
   $$("[data-test]").forEach(b => b.onclick = async () => {
     const out = $(`[data-res="${b.dataset.test}"]`);
     b.disabled = true; out.className = "acc-result small muted"; out.textContent = "Łączę…";
@@ -2608,7 +2629,8 @@ async function renderChart(symParam) {
   const tfs = [["15Min", "15 min"], ["1Hour", "1 h"], ["4Hour", "4 h"], ["1Day", "1 dzień"]];
   view.innerHTML = `
     <div class="page-head"><div><h1>Wykresy</h1>
-      <div class="muted small" style="margin-top:4px">Świece dowolnej spółki, ETF-u, waluty albo kryptowaluty — z zakupami i sprzedażami Twoich botów.</div></div></div>
+      <div class="muted small" style="margin-top:4px">Świece dowolnej spółki, ETF-u, waluty albo kryptowaluty — z zakupami i sprzedażami Twoich botów.</div></div>
+      ${sym ? `<div class="actions"><button class="btn primary" id="ch-order">Kup / sprzedaj ${esc(sym)}</button></div>` : ""}</div>
     <div class="card ch-bar">
       <form id="ch-form" class="ch-form">
         <input id="ch-sym" list="ch-list" placeholder="np. PKN.WSE, AAPL, BTC/USD, EUR.USD" value="${esc(sym)}"
@@ -2626,6 +2648,7 @@ async function renderChart(symParam) {
         ${meta.held.map(x => `<a class="chip" href="#/chart/${encodeURIComponent(x)}">${esc(x)}</a>`).join("")}</div>` : ""}
     </div>
     <div id="ch-body"></div>`;
+  $("#ch-order") && ($("#ch-order").onclick = () => orderTicket(sym));
   $("#ch-form").onsubmit = e => {
     e.preventDefault();
     const v = $("#ch-sym").value.trim().toUpperCase();
@@ -3350,4 +3373,242 @@ async function renderGallery() {
     } catch (err) { out.innerHTML = `<p class="err">${esc(err.message)}</p>`; }
     finally { btn.disabled = false; btn.textContent = "Zamień na ustawienia"; }
   };
+}
+
+
+// ------------------------------------------------------------------ NAUKA DŹWIGNI (karta w Laboratorium)
+async function drawLevStudy() {
+  const box = $("#lev-study");
+  if (!box) return;
+  const d = await api("GET", "/api/lab/leverage-study");
+  drawLevStudy.running = d.status === "running";
+  const ok = d.candidates.filter(c => c.ok);
+  const cell = s => s ? `<span class="${tone(s.ret)}">${pct(s.ret, 1)}</span> <span class="muted small">/ ${pct(s.dd, 1)}</span>` : "—";
+  const bots = (d.bots || []).map(r => {
+    if (r.skipped) return `<p class="muted small">${esc(r.name)}: pominięty — ${esc(r.skipped)}</p>`;
+    const base = r.variants.find(v => v.key === "base");
+    return `<details ${r.seeded.length ? "open" : ""} style="margin-top:10px"><summary><b>${esc(r.name)}</b>
+        <span class="muted small">· ${esc(r.period[0])} → ${esc(r.period[1])}, sprawdzian od ${esc(r.split || "")}</span>
+        ${r.error ? `<span class="f-tag down">${esc(r.error)}</span>` : r.seeded.length ? `<span class="f-tag up">${r.seeded.length} → laboratorium</span>`
+          : (r.kept || []).length ? `<span class="f-tag info">${r.kept.length} dalej w grze</span>`
+          : d.status === "done" ? `<span class="f-tag muted">dźwignia nie poprawia wyniku</span>` : ""}
+        ${(r.retired || []).length ? `<span class="f-tag muted">${r.retired.length} wycofane</span>` : ""}</summary>
+      <div class="table-wrap"><table><thead><tr><th>Wariant</th><th class="num">Cały okres</th><th class="num">Obsunięcie</th>
+        <th class="num">Nauka: zwrot / obs.</th><th class="num">Sprawdzian: zwrot / obs.</th><th>Werdykt</th></tr></thead><tbody>
+      ${r.variants.map(v => `<tr><td>${v.key === "base" ? "👑 " : ""}${esc(v.label)}</td>
+        <td class="num ${tone(v.total)}">${v.total == null ? "—" : pct(v.total, 1)}</td><td class="num down">${v.dd == null ? "—" : pct(v.dd, 1)}</td>
+        <td class="num">${cell(v.is)}</td><td class="num">${cell(v.oos)}</td>
+        <td class="small">${v.error ? `<span class="down">${esc(v.error)}</span>` : v.key === "base" ? '<span class="muted">punkt odniesienia</span>'
+          : !v.why ? '<span class="muted">liczy się…</span>' : v.why.length ? `<span class="muted">${esc(v.why.join(", "))}</span>`
+          : `<span class="up">${r.seeded.includes(v.label) ? "przechodzi → laboratorium" : (r.kept || []).includes(v.label) ? "przechodzi — dalej w grze" : "przechodzi"}</span>`}</td></tr>`).join("")}
+      </tbody></table></div></details>`;
+  }).join("");
+  const pl = d.plan || {};
+  const nBots = `${ok.length} bot${ok.length === 1 ? "" : "ów"}`;
+  box.innerHTML = `<div class="card-head"><h2>Nauka dźwigni na historii</h2>
+      ${d.status === "running" ? `<span class="muted small">trwa… ${num((d.progress || 0) * 100, 0)}%</span>`
+        : `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            ${pl.next_at ? "" : `<label class="check small" style="padding:0"><input type="checkbox" id="ls-weekly"> potem co tydzień</label>
+              <button class="btn small primary" id="ls-night" ${ok.length ? "" : "disabled"}>Zaplanuj na noc (01:00, ${nBots})</button>`}
+            <button class="btn small" id="ls-go" ${ok.length ? "" : "disabled"}>Uruchom teraz</button></div>`}</div>
+    ${pl.next_at ? `<div class="note" style="margin:0 0 10px;display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+        <span>🌙 Zaplanowano: <b>${when(pl.next_at)}</b>${pl.weekly ? ", potem co tydzień w nocy z soboty na niedzielę" : ""}.
+        Wynik przyjdzie powiadomieniem.</span><button class="btn ghost small" id="ls-cancel">Odwołaj</button></div>` : ""}
+    <p class="muted small" style="margin:0 0 6px">Dla każdego bota panel testuje na prawdziwej historii jego wersje z dźwignią i grą na spadki
+      (z prowizjami i odsetkami). Wariant trafia do laboratorium tylko, gdy w <b>sprawdzianie</b> (ostatnie 35% okresu, niewidziane przy wyborze)
+      zarabia więcej, a obecne ustawienia same zarabiają. Stosunek zysku do obsunięcia może spaść najwyżej o 10%, a obsunięcie musi zostać w granicach 30%.
+      Bot, który już gra z dźwignią, uczy się też ją zmniejszać, gdy to wyraźnie poprawia ten stosunek. Potem wariant musi wygrać jeszcze na żywo, na niby
+      (min. transakcji i dni z ustawień laboratorium, obsunięcie do 25%) — dopiero wtedy przejmuje bota
+      (konto papierowe: samo, prawdziwe pieniądze: po Twojej zgodzie, a dźwignia dodatkowo wymaga zgody w zakładce Ryzyko).
+      Inne warianty dźwigni do laboratorium nie wchodzą. Nauka trwa od kilkunastu minut do kilku godzin.</p>
+    ${d.status === "running" ? `<div class="progress" style="margin:8px 0"><div style="width:${(d.progress || 0) * 100}%"></div></div>` : ""}
+    ${d.finished ? `<p class="muted small">Ostatnia nauka: ${when(d.finished)}</p>` : ""}
+    ${d.status === "error" ? `<p class="err">${esc(d.error || "błąd")}</p>` : ""}
+    ${bots}
+    ${d.candidates.filter(c => !c.ok).length ? `<p class="muted small" style="margin-top:8px">Nie uczą się dźwigni: ${d.candidates.filter(c => !c.ok).map(c => `${esc(c.name)} (${esc(c.why)})`).join("; ")}.</p>` : ""}`;
+  $("#ls-night") && ($("#ls-night").onclick = async () => {
+    try {
+      await api("POST", "/api/lab/leverage-study", { bot_ids: [], when: "night", weekly: $("#ls-weekly").checked });
+      toast("Nauka dźwigni zaplanowana na noc"); drawLevStudy();
+    } catch (e) { toast(e.message, true); }
+  });
+  $("#ls-cancel") && ($("#ls-cancel").onclick = async () => {
+    await api("DELETE", "/api/lab/leverage-study/plan"); toast("Odwołano"); drawLevStudy();
+  });
+  $("#ls-go") && ($("#ls-go").onclick = async () => {
+    if (!confirmBox("Uruchomić naukę dźwigni? Backtesty idą w tle na serwerze; boty działają normalnie. Warianty, które przejdą test, trafią do laboratorium.")) return;
+    try { await api("POST", "/api/lab/leverage-study", { bot_ids: [] }); toast("Nauka dźwigni uruchomiona"); drawLevStudy(); }
+    catch (e) { toast(e.message, true); }
+  });
+}
+
+
+// ------------------------------------------------------------------ KONTA GIEŁD KRYPTO W FORMULARZU BOTA
+function isReal(a) { return !(a.paper || a.type === "sim" || a.sandbox); }
+function isCryptoEx(a) { return a && (a.type === "kraken" || a.type === "gielda"); }
+// konto giełdy krypto: tylko rynek krypto i pary w walucie konta (BTC/USD -> BTC/USDT)
+function adaptToAccount(root, convert) {
+  const a = SCHEMA.accounts.find(x => x.name === $("#f-account", root).value);
+  const mk = $("#f-market", root);
+  const stockOpt = mk.querySelector('option[value="stocks"]');
+  if (stockOpt) stockOpt.disabled = isCryptoEx(a);
+  if (isCryptoEx(a) && mk.value !== "crypto") {
+    mk.value = "crypto";
+    mk.dispatchEvent(new Event("change"));
+  }
+  if (isCryptoEx(a) && convert !== false) {
+    const q = a.currency || "USD";
+    const fix = v => v.replace(/\b([A-Z0-9]{2,10})\/(USD|USDT|USDC|EUR|BUSD)\b/g, (m, base) => `${base}/${q}`);
+    ["#p_symbols", "#p_regime_symbol"].forEach(sel => { const el = $(sel, root); if (el && el.value) el.value = fix(el.value); });
+    const sy = $("#p_symbols", root);
+    if (sy && !sy.value.trim()) sy.value = `BTC/${q}, ETH/${q}`;
+  }
+  accountNote(root);
+}
+let ACC_EQ = null;
+async function accountNote(root) {
+  const box = $("#acc-note", root);
+  if (!box) return;
+  const a = SCHEMA.accounts.find(x => x.name === $("#f-account", root).value);
+  if (!a || a.type === "sim") { box.classList.add("hidden"); return; }
+  if (!ACC_EQ) {
+    try { ACC_EQ = Object.fromEntries((await api("GET", "/api/overview")).accounts.map(x => [x.name, x])); }
+    catch { ACC_EQ = {}; }
+  }
+  const e = ACC_EQ[a.name] || {}, p = readParams($("#params-box", root));
+  const cur = e.currency || a.currency || "USD";
+  const budget = (e.equity || 0) * (p.allocation_pct || 0), per = budget / Math.max(1, p.max_positions || 1);
+  const minNote = isCryptoEx(a) ? (a.exchange === "binance" ? 5 : 5) : 0;
+  const lines = [];
+  if (isCryptoEx(a)) lines.push(`Giełda ${esc(a.exchange || a.type)}: tylko krypto, pary w <b>${esc(a.currency)}</b> (np. BTC/${esc(a.currency)}). Bot zarządza wyłącznie monetami, które sam kupi — Twoje inne monety zostają w spokoju.`);
+  if (e.equity != null) lines.push(`Kapitał konta ${money(e.equity, cur)} → budżet bota ≈ <b>${money(budget, cur)}</b>, na jedną pozycję ≈ <b>${money(per, cur)}</b>.`);
+  if (minNote && e.equity != null && per < minNote * 1.2)
+    lines.push(`<b>Za mało na jedną pozycję</b> — giełda nie przyjmie zlecenia poniżej ok. ${minNote} ${esc(cur)}. Zwiększ budżet albo zmniejsz „Maks. pozycji”.`);
+  if (e.cash != null && isCryptoEx(a) && budget > e.cash) lines.push(`Wolnej gotówki jest ${money(e.cash, cur)} — bot kupi tylko za tyle, ile jest w ${esc(cur)}.`);
+  if (isReal(a)) lines.unshift(`<b>PRAWDZIWE PIENIĄDZE.</b> Zacznij od małego budżetu i sprawdź bota najpierw w backteście.`);
+  box.className = "note" + (isReal(a) || (minNote && per < minNote * 1.2) ? " warn" : "");
+  box.innerHTML = lines.join("<br>");
+}
+
+// ------------------------------------------------------------------ ZLECENIE RĘCZNE (kilka akcji / monet bez bota)
+function orderTicket(symbol, side = "buy") {
+  const accs = SCHEMA.accounts;
+  const guess = symbol.includes("/") ? (accs.find(a => isCryptoEx(a) && symbol.endsWith("/" + a.currency)) || accs.find(a => a.type === "alpaca"))
+    : symbol.includes(".") ? accs.find(a => a.type === "ibkr") : accs.find(a => a.type === "alpaca");
+  openModal(`
+    <div class="card-head"><h2>Zlecenie ręczne</h2><button class="btn ghost small" id="o-close">Zamknij</button></div>
+    <form class="form" id="o-form" autocomplete="off">
+      <div class="seg" id="o-side" style="margin-bottom:6px"><button type="button" data-s="buy">Kup</button><button type="button" data-s="sell">Sprzedaj</button></div>
+      <div class="form-grid">
+        <div class="field"><label>Konto</label><select id="o-acc">${accs.map(a => `<option value="${esc(a.name)}" ${guess && a.name === guess.name ? "selected" : ""}>${esc(a.name)} (${esc(accDesc(a))})</option>`).join("")}</select></div>
+        <div class="field"><label>Symbol</label><input id="o-sym" value="${esc(symbol)}" placeholder="np. NVDA, PKO.WSE, BTC/USDT" spellcheck="false" autocapitalize="characters"></div>
+        <div class="field"><label id="o-qty-l">Liczba akcji</label><input id="o-qty" type="number" step="any" min="0" value="1"></div>
+      </div>
+      <div id="o-info" class="note">Wpisz symbol, żeby zobaczyć cenę.</div>
+      <div id="o-auth" class="form-grid hidden">
+        <div class="field"><label>Hasło do panelu</label><input id="o-pass" type="password" autocomplete="current-password"></div>
+        <div class="field"><label>Kod 2FA (jeśli włączony)</label><input id="o-code" inputmode="numeric" maxlength="11"></div>
+      </div>
+      <p class="err" id="o-err"></p>
+      <div class="modal-foot"><button type="button" class="btn" id="o-cancel">Anuluj</button>
+        <button class="btn primary" type="submit" id="o-go" disabled>Złóż zlecenie</button></div>
+    </form>`);
+  let q = null, sd = side, timer = null;
+  const setSide = v => { sd = v; $$("#o-side button").forEach(b => b.classList.toggle("on", b.dataset.s === v)); render(); };
+  const render = () => {
+    const info = $("#o-info"), go = $("#o-go");
+    go.disabled = true;
+    if (!q) return;
+    if (q.error) { info.className = "note warn"; info.textContent = q.error; return; }
+    const crypto = q.kind === "crypto";
+    $("#o-qty-l").textContent = crypto ? "Ilość monet" : q.whole_only ? "Liczba akcji (całe sztuki)" : "Liczba akcji (można ułamki)";
+    $("#o-qty").step = q.whole_only ? "1" : "any";
+    const n = +$("#o-qty").value || 0, val = n * (q.price || 0);
+    const lines = [`Cena teraz: <b>${price(q.price)} ${esc(q.currency)}</b> · gotówka: ${money(q.cash, q.currency)} · na koncie: ${num(q.held, 6)} ${esc(q.symbol)}`,
+      `${sd === "buy" ? "Kupisz" : "Sprzedasz"} <b>${num(n, 6)}</b> × ${price(q.price)} ≈ <b>${money(val, q.currency)}</b> (po cenie rynkowej, może się nieco różnić).`];
+    let bad = "";
+    if (q.locked_by) bad = `Tym symbolem na tym koncie handluje bot „${esc(q.locked_by)}” — ręczne zlecenie pomieszałoby się z jego pozycją.`;
+    else if (!q.open) bad = esc(q.closed_note || "Rynek jest zamknięty.");
+    else if (n <= 0) bad = "Podaj ilość większą od zera.";
+    else if (q.whole_only && n !== Math.floor(n)) bad = "Na tym koncie akcje kupuje się w całych sztukach.";
+    else if (sd === "buy" && val > q.cash * 0.995) bad = "Za mało gotówki na koncie.";
+    else if (sd === "sell" && n > q.held + 1e-9) bad = `Na koncie masz tylko ${num(q.held, 6)}.`;
+    if (q.real) lines.unshift(`<b>PRAWDZIWE PIENIĄDZE</b> — zlecenie wymaga hasła do panelu.`);
+    if (bad) lines.push(`<b>${bad}</b>`);
+    info.className = "note" + (bad || q.real ? " warn" : "");
+    info.innerHTML = lines.join("<br>");
+    $("#o-auth").classList.toggle("hidden", !q.real);
+    go.disabled = !!bad;
+    go.textContent = `${sd === "buy" ? "Kup" : "Sprzedaj"} ${num(n, 6)} ${q.symbol}`;
+    go.className = "btn " + (sd === "buy" ? "primary" : "danger");
+  };
+  const load = async () => {
+    const sym = $("#o-sym").value.trim().toUpperCase();
+    q = null; $("#o-go").disabled = true;
+    if (!sym) { $("#o-info").className = "note"; $("#o-info").textContent = "Wpisz symbol, żeby zobaczyć cenę."; return; }
+    $("#o-info").className = "note"; $("#o-info").textContent = "Sprawdzam cenę…";
+    try { q = await api("GET", `/api/manual/quote?account=${encodeURIComponent($("#o-acc").value)}&symbol=${encodeURIComponent(sym)}`); }
+    catch (e) { q = { error: e.message }; }
+    if (sd === "sell" && q && q.held > 0 && !$("#o-qty").dataset.touched) $("#o-qty").value = +q.held.toFixed(8);
+    render();
+  };
+  $$("#o-side button").forEach(b => b.onclick = () => setSide(b.dataset.s));
+  $("#o-acc").onchange = load;
+  $("#o-sym").oninput = () => { clearTimeout(timer); timer = setTimeout(load, 500); };
+  $("#o-qty").oninput = () => { $("#o-qty").dataset.touched = "1"; render(); };
+  $("#o-close").onclick = $("#o-cancel").onclick = closeModal;
+  $("#o-form").onsubmit = async e => {
+    e.preventDefault();
+    if (!q || $("#o-go").disabled) return;
+    const n = +$("#o-qty").value;
+    if (!confirmBox(`${sd === "buy" ? "Kupić" : "Sprzedać"} ${n} ${q.symbol} po cenie rynkowej (~${money(n * q.price, q.currency)}) na koncie ${q.account}${q.real ? " — PRAWDZIWE PIENIĄDZE" : ""}?`)) return;
+    $("#o-err").textContent = ""; $("#o-go").disabled = true; $("#o-go").textContent = "Wysyłam…";
+    try {
+      const r = await api("POST", "/api/manual/order", { account: q.account, symbol: q.symbol, side: sd, qty: n,
+        password: $("#o-pass").value, code: $("#o-code").value });
+      closeModal(); toast(r.text);
+      if ($("#t-manual-list")) drawManualOrders();
+    } catch (err) { $("#o-err").textContent = err.message; render(); }
+  };
+  setSide(side);
+  if (symbol) load();
+}
+async function drawManualOrders() {
+  const box = $("#t-manual-list");
+  if (!box) return;
+  const rows = await api("GET", "/api/manual/orders?limit=30");
+  if (!rows.length) { box.innerHTML = `<h2>Zlecenia ręczne</h2><div class="muted small">Jeszcze żadnych. Przycisk „Zlecenie ręczne” (albo „Kup / sprzedaj” na wykresie) kupi kilka akcji lub monet bez bota.</div>`; return; }
+  const ST = { filled: ["wykonane", "up"], error: ["odrzucone", "down"], sent: ["wysłane", "info"] };
+  box.innerHTML = `<h2>Zlecenia ręczne</h2><div class="table-wrap"><table><thead><tr><th>Czas</th><th>Konto</th><th>Symbol</th><th>Strona</th>
+    <th class="num">Ilość</th><th class="num">Cena</th><th class="num">Wartość</th><th>Status</th></tr></thead><tbody>
+    ${rows.map(r => { const [t, c] = ST[r.status] || [r.status, "muted"];
+      return `<tr><td class="small">${when(r.ts)}</td><td>${esc(r.account)}</td><td><a class="sym" href="#/chart/${encodeURIComponent(r.symbol)}"><b>${esc(r.symbol)}</b></a></td>
+      <td class="${r.side === "buy" ? "" : "muted"}">${r.side === "buy" ? "Kupno" : "Sprzedaż"}</td><td class="num">${num(r.qty, 6)}</td>
+      <td class="num">${r.price == null ? "—" : price(r.price)}</td><td class="num">${r.value == null ? "—" : num(r.value, 2)}</td>
+      <td><span class="f-tag ${c}">${t}</span>${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ""}</td></tr>`; }).join("")}</tbody></table></div>`;
+}
+
+
+// ------------------------------------------------------------------ PORTFEL KONTA (co jest na koncie)
+async function holdingsModal(name) {
+  openModal(`<div class="card-head"><h2>Portfel: ${esc(name)}</h2><button class="btn ghost small" id="h-close">Zamknij</button></div>
+    <div id="h-body"><div class="empty">Odczytuję konto…</div></div>`);
+  $("#h-close").onclick = closeModal;
+  let d;
+  try { d = await api("GET", `/api/accounts/${encodeURIComponent(name)}/holdings`); }
+  catch (e) { $("#h-body").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const cur = d.currency, tot = d.equity || 1;
+  $("#h-body").innerHTML = `
+    <div class="grid metrics" style="margin-bottom:12px">${metric("Wartość konta", money(d.equity, cur))}${metric("Gotówka", money(d.cash, cur))}
+      ${metric("Pozycje", d.positions.length)}</div>
+    ${d.real ? `<p class="note warn" style="margin-bottom:10px">Prawdziwe pieniądze.</p>` : ""}
+    ${!d.positions.length ? `<div class="empty">Brak pozycji — tylko gotówka.</div>` : `<div class="table-wrap"><table><thead><tr><th>Symbol</th>
+      <th class="num">Ilość</th><th class="num">Cena</th><th class="num">Wartość</th><th class="num">Udział</th><th class="num">Wynik</th><th>Kto prowadzi</th><th></th></tr></thead><tbody>
+      ${d.positions.map(p => `<tr><td><a class="sym" href="#/chart/${encodeURIComponent(p.symbol)}"><b>${esc(p.symbol)}</b></a></td>
+        <td class="num">${num(p.qty, 6)}</td><td class="num">${price(p.price)}</td><td class="num">${money(p.value, cur)}</td>
+        <td class="num">${pct((p.value || 0) / tot * 100, 1, false)}</td>
+        <td class="num ${tone(p.unrealized)}">${p.bot ? money(p.unrealized, cur, true) : '<span class="muted small" title="cena zakupu poza botem nieznana">—</span>'}</td>
+        <td class="small">${p.bot ? esc(p.bot) : '<span class="muted">Ty (poza botami)</span>'}</td>
+        <td>${p.bot ? "" : `<button class="btn ghost small" data-sell="${esc(p.symbol)}">Sprzedaj…</button>`}</td></tr>`).join("")}</tbody></table></div>`}`;
+  $$("[data-sell]").forEach(b => b.onclick = () => { closeModal(); orderTicket(b.dataset.sell, "sell"); });
 }

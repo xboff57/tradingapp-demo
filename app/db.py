@@ -127,6 +127,18 @@ CREATE TABLE IF NOT EXISTS bot_state (
     data      TEXT NOT NULL,
     PRIMARY KEY (bot_id, symbol)
 );
+CREATE TABLE IF NOT EXISTS manual_orders (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        TEXT NOT NULL,
+    account   TEXT NOT NULL,
+    symbol    TEXT NOT NULL,
+    side      TEXT NOT NULL,
+    qty       REAL NOT NULL,
+    price     REAL,
+    value     REAL,
+    status    TEXT NOT NULL,
+    note      TEXT
+);
 CREATE TABLE IF NOT EXISTS tv_alerts (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     bot_id    INTEGER NOT NULL,

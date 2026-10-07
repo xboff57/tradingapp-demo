@@ -7,6 +7,53 @@ w folderze `wydania/` jako `tradingapp-X.Y.Z.zip` — tą paczką możesz też *
 
 Wersje do 1.3.1 miały numery z datą (np. `2026.09.30-11`) — w paczkach tych wersji taki numer nadal widać w panelu.
 
+## 1.27.2
+- **Konta → Portfel:** podgląd, co jest na koncie — gotówka, pozycje z wyceną i udziałem, kto je prowadzi (bot albo Ty).
+  Przy pozycjach spoza botów jest przycisk „Sprzedaj…” (otwiera zlecenie ręczne z wpisaną ilością).
+
+## 1.27.1
+- Zlecenie ręczne: godzina otwarcia sesji pokazywana w czasie polskim (wcześniej Alpaca dawała czas nowojorski z dopiskiem UTC).
+
+## 1.27.0
+- **Zlecenie ręczne:** kupno albo sprzedaż kilku akcji lub monet bez bota.
+  - Gdzie: przycisk „Kup / sprzedaj” na wykresie i „Zlecenie ręczne” w zakładce Transakcje.
+  - Panel pokazuje cenę, koszt, gotówkę i posiadane sztuki.
+  - Zlecenie idzie po rynku, bez dźwigni. Akcje: tylko w trakcie sesji, na IBKR w całych sztukach, na Alpace także ułamki.
+  - Symbol, którym handluje bot na tym koncie, jest zablokowany, żeby bot nie przejął ręcznie kupionych akcji.
+  - Konto z prawdziwymi pieniędzmi: hasło i kod 2FA przy każdym zleceniu.
+  - Historia zleceń jest w zakładce Transakcje, a każde wykonane zlecenie przychodzi powiadomieniem.
+- **Bot na koncie giełdy krypto** (Binance, Kraken i inne przez CCXT):
+  - po wybraniu konta formularz sam przełącza rynek na krypto i zamienia pary na walutę konta (BTC/USD → BTC/USDT);
+  - pokazuje budżet bota i kwotę na jedną pozycję oraz ostrzega, gdy wyjdzie poniżej minimum giełdy.
+- Start bota na koncie z prawdziwymi pieniędzmi wymaga potwierdzenia.
+
+## 1.26.2
+- Szybszy panel na wolnym łączu, np. Tailscale przez przekaźnik, gdy sieć blokuje UDP:
+  - kompresja gzip — skrypt panelu 261 → 77 KB, style 36 → 8 KB;
+  - pliki z numerem wersji przeglądarka trzyma u siebie do następnej aktualizacji, bez pytania serwera przy każdym otwarciu.
+
+## 1.26.1
+- Paski zakładek (Radar, backtest, wykresy…) nie pokazują już na Windowsie zbędnych strzałek przewijania. Na telefonie zakładki nadal przesuwa się palcem.
+
+## 1.26.0
+- **Nauka dźwigni** (zakładka Laboratorium, karta „Nauka dźwigni na historii”):
+  - Dla każdego bota z sygnałami panel testuje na prawdziwej historii jego wersje z dźwignią i grą na spadki: ETF 2×, margin, spadki. Bot, który już ma dźwignię, testuje też niższą dźwignię albo jej brak.
+  - Dane dzielone są na część do nauki (65%) i sprawdzian (35%, niewidziany przy wyborze).
+- **Do laboratorium trafiają tylko warianty, które przeszły sprawdzian** (maks. 2 na bota). Tam grają na żywo, na niby.
+  - Bota przejmują dopiero po wygranej także na nowych danych: na koncie papierowym same, na prawdziwych po zgodzie.
+  - Dźwignia na prawdziwym koncie dodatkowo wymaga zgody w zakładce Ryzyko.
+- **Reguły dla dźwigni:**
+  - obecna strategia musi sama zarabiać,
+  - wariant musi zarabiać więcej,
+  - stosunek zysku do obsunięcia może spaść najwyżej o 10%,
+  - obsunięcie: do 30% na historii i do 25% na żywo.
+  
+  Zmniejszenie dźwigni wygrywa, gdy wyraźnie poprawia stosunek zysku do obsunięcia.
+- **Harmonogram:** nauka o 01:00 w nocy, jednorazowo albo co tydzień (noc z soboty na niedzielę); wynik przychodzi powiadomieniem.
+  - Kolejne nauki nie zerują wariantów, które już grają, a wycofują te, które przestały przechodzić.
+- Laboratorium obsługuje boty z dźwignią i wirtualne pozycje na spadek: wynik liczony od własnego kapitału, z prowizjami i odsetkami.
+- Warianty dźwigni nie wchodzą już do laboratorium bez sprawdzianu na historii.
+
 ## 1.25.1
 - **Galeria strategii z wynikami:** 9 backtestów na prawdziwych danych (IBKR, Alpaca, 2021–2026, z kosztami), z wykresem kapitału i porównaniem z „kup i trzymaj”.
 - **Instalator Windows** (pełna wersja, w repozytorium tradingapp-demo):

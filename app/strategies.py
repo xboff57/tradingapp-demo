@@ -135,6 +135,10 @@ COMMON_PARAMS = [
     # --- laboratorium wariantow (app/lab.py)
     {"key": "lab_enabled", "label": "Laboratorium: testuj warianty na żywo (na niby)", "type": "bool", "group": "lab",
      "help": "Obok bota działa kilka wirtualnych wersji z innymi ustawieniami; zwycięzca może przejąć bota."},
+    {"key": "lab_scope", "label": "Laboratorium: co testować", "type": "choice", "options": ["all", "leverage"],
+     "labels": {"all": "wszystkie warianty", "leverage": "tylko dźwignię"}, "group": "lab",
+     "help": "„Tylko dźwignię”: obok bota grają wyłącznie jego wersje z dźwignią / grą na spadki (albo bez dźwigni, "
+             "gdy bot już jej używa). Dźwignia wygrywa tylko, gdy poprawia wynik bez gorszego stosunku zysku do obsunięcia."},
     {"key": "lab_min_trades", "label": "Min. transakcji, by wariant mógł wygrać", "type": "int", "min": 10, "max": 500,
      "group": "lab"},
     {"key": "lab_min_days", "label": "Min. dni testu, by wariant mógł wygrać", "type": "int", "min": 3, "max": 180,
@@ -162,7 +166,7 @@ CONTEXT_DEFAULTS = {"regime2_symbol": "", "regime2_sma_days": 200, "breadth_filt
                     "breadth_min": 0.5, "breadth_sma_days": 200}
 SIGNAL_DEFAULTS = {"copy_signals": False, "manual_capital": 0.0}
 LEV_DEFAULTS = {"leverage_mode": "off", "direction": "long", "leverage": 1.0, "etf_pairs": []}
-LAB_DEFAULTS = {"lab_enabled": False, "lab_min_trades": 30, "lab_min_days": 14}
+LAB_DEFAULTS = {"lab_enabled": False, "lab_scope": "all", "lab_min_trades": 30, "lab_min_days": 14}
 EXIT_DEFAULTS = {"trail_atr_mult": 0.0, "breakeven_after_pct": 0.0, "max_hold_days": 0}
 ML_DEFAULTS = {"ml_filter": False, "ml_sizing": False, "ml_confidence": "mid", "ml_horizon": 24,
                "ml_train_days": 365, "ml_exit_drop": 0.05}
@@ -612,8 +616,6 @@ def validate(market: str, strategy: str, p: dict) -> list:
         errors.append("Alerty z TradingView nie łączą się z ML ani laboratorium.")
     if mode != "off" and (strategy in ("copy_funds", "ml_model") or p.get("ml_filter") or p.get("ml_sizing")):
         errors.append("Dźwignia i gra na spadki nie łączą się z ML ani kopiowaniem funduszy (modele uczą się tylko kupna).")
-    if mode != "off" and p.get("lab_enabled"):
-        errors.append("Laboratorium wariantów nie obsługuje jeszcze dźwigni — wyłącz je dla tego bota.")
     if mode != "off" and p.get("stop_loss_pct", 0) * lev > 0.5:
         errors.append(f"Stop-loss × dźwignia = {p['stop_loss_pct'] * lev:.0%} budżetu pozycji na jednej stracie — "
                       "za dużo (maks. 50%). Zmniejsz stop-loss albo dźwignię.")

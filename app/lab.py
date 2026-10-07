@@ -11,6 +11,12 @@ Laboratorium wariantow - ciagle testowanie "na niby" obok prawdziwego bota.
   - Zwyciezca przejmuje bota: na koncie papierowym automatycznie, na koncie z prawdziwymi pieniedzmi
     dopiero po Twoim kliknieciu. Po zmianie mistrza porownanie startuje od nowa.
 
+Dzwignia (warianty "lev_*"): wariant moze grac z dzwignia (ETF 2x / margin) i na spadki. Wynik transakcji liczony jest
+od wlasnego kapitalu: ruch ceny x dzwignia, minus prowizje i koszt pozyczki. Taki pretendent wygrywa TYLKO, gdy poprawia
+wynik, obecna strategia sama zarabia, stosunek zysku do obsuniecia (Calmar) jest najwyzej o 10% gorszy, a obsuniecie
+nie przekracza 25% - dzwignia ma zwiekszac zysk z dobrej strategii, a nie ratowac slaba. Warianty ZMNIEJSZAJACE dzwignie
+(lev_off / lev_long_only / lev_lower) wygrywaja, gdy wyraznie poprawiaja stosunek zysku do obsuniecia (funkcja lev_verdict).
+
 Wyniki wariantow: kazda transakcja ma wage = udzial w kapitale (1 / max pozycji, x skalowanie pewnoscia ML),
 wynik po kosztach (2 x prowizja), kapital wirtualny liczony narastajaco.
 """
@@ -24,7 +30,7 @@ import pandas as pd
 from . import ml
 from . import signals as ext
 from .rules import atr as atr_series
-from .strategies import STRATEGIES, full_params
+from .strategies import STRATEGIES, full_params, lev_factor, with_short
 
 SKIP_KEYS = {"tf_slower", "drop_symbols", "flatten_toggle", "insider_veto", "insider_confirm", "ext_off", "funds_veto",
              "funds_confirm", "funds_off", "ml_filter_on", "more_positions", "fewer_positions"}
@@ -37,10 +43,98 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def default_variants(strategy, market, p):
-    """[(key, label, kind, changes)] - mistrz + pretendenci z jedna zmiana."""
+LEV_STRATEGIES = {"rules", "sma_cross", "mean_reversion", "breakout", "rsi_reversion", "donchian"}
+
+
+def is_lev(changes):
+    return any(k in (changes or {}) for k in ("leverage_mode", "direction", "leverage"))
+
+
+DELEVER = {"lev_off", "lev_long_only", "lev_lower"}      # warianty, które ZMNIEJSZAJĄ ryzyko bota z dźwignią
+
+
+def calmar(ret, dd):
+    return ret / max(abs(dd), 1.0)
+
+
+def lev_verdict(key, champ_ret, champ_dd, ret, dd, dd_cap):
+    """Wspólna ocena wariantu dźwigni (historia i laboratorium na żywo). Pusta lista = przechodzi.
+      - zwiększenie dźwigni / gra na spadki: obecna strategia musi zarabiać, wariant zarabia więcej (> 1 pp),
+        stosunek zysku do obsunięcia najwyżej o 10% gorszy (czysta dźwignia mnoży zysk i obsunięcie po równo,
+        koszty pożyczki obniżają go o włos), obsunięcie w limicie;
+      - zmniejszenie dźwigni: stosunek zysku do obsunięcia lepszy o co najmniej 10% albo obecne obsunięcie
+        przekracza limit, a wariant się w nim mieści."""
+    why = []
+    c0, c1 = calmar(champ_ret, champ_dd), calmar(ret, dd)
+    if key in DELEVER:
+        too_risky = champ_dd < -dd_cap and dd >= -dd_cap
+        if not too_risky and c1 < c0 + max(abs(c0) * 0.1, 0.05):
+            why.append("nie poprawia stosunku zysku do obsunięcia (o ≥10%)")
+        return why
+    if champ_ret <= 0:
+        why.append("obecne ustawienia nie zarabiają — dźwignia powiększyłaby stratę")
+    if ret <= champ_ret + 1:
+        why.append("nie zarabia więcej (> 1 pp)")
+    if c1 < c0 - max(abs(c0) * 0.1, 0.05):
+        why.append("stosunek zysku do obsunięcia gorszy o ponad 10%")
+    if dd < -dd_cap:
+        why.append(f"obsunięcie ponad {dd_cap:.0f}%")
+    return why
+
+
+def lev_variants(strategy, market, p, acc):
+    """Warianty dźwigni możliwe dla bota i konta: [(key, label, changes)]."""
+    if acc is None or strategy not in STRATEGIES or ml.uses_ml(strategy, p) or strategy in ("copy_funds", "grid", "dca",
+                                                                                            "tv_alerts"):
+        return []
+    from . import levetf, risk
+    t = acc.type
+    cap = risk.max_leverage(acc, market)
+    mode = p.get("leverage_mode", "off")
+    syms = p.get("symbols") or []
+    gpw = any(x.endswith(".WSE") for x in syms)
+    out = []
+    if mode == "off":
+        if market == "stocks" and t in ("alpaca", "ibkr", "sim"):
+            if any(x.upper() in levetf.PAIRS for x in syms):
+                out.append(("lev_etf_long", "Dźwignia: ETF 2× na wzrost", {"leverage_mode": "etf", "direction": "long"}))
+                out.append(("lev_etf_both", "Dźwignia: ETF 2× na wzrost i odwrotne na spadek",
+                            {"leverage_mode": "etf", "direction": "both"}))
+            out.append(("lev_m15_long", "Dźwignia: margin 1,5× na wzrost",
+                        {"leverage_mode": "margin", "direction": "long", "leverage": min(1.5, cap)}))
+            if not gpw:
+                out.append(("lev_m15_both", "Dźwignia: margin 1,5× na wzrost i spadek",
+                            {"leverage_mode": "margin", "direction": "both", "leverage": min(1.5, cap)}))
+        elif market == "crypto" and t in ("kraken", "sim"):
+            out.append(("lev_m2_long", "Dźwignia: margin 2× na wzrost",
+                        {"leverage_mode": "margin", "direction": "long", "leverage": min(2.0, cap)}))
+            out.append(("lev_m2_both", "Dźwignia: margin 2× na wzrost i spadek",
+                        {"leverage_mode": "margin", "direction": "both", "leverage": min(2.0, cap)}))
+    else:
+        lev = float(p.get("leverage") or 1)
+        out.append(("lev_off", "Bez dźwigni (tylko kupno za swoje)", {"leverage_mode": "off", "direction": "long",
+                                                                      "leverage": 1.0}))
+        if p.get("direction") != "long":
+            out.append(("lev_long_only", "Dźwignia tylko na wzrost", {"direction": "long"}))
+        if mode == "margin" and lev > 1.25:
+            out.append(("lev_lower", f"Dźwignia niższa: {max(1.0, lev - 0.5):.1f}×".replace(".", ","),
+                        {"leverage": max(1.0, lev - 0.5)}))
+        if mode == "margin" and lev + 1 <= cap and market == "crypto":
+            out.append(("lev_higher", f"Dźwignia wyższa: {lev + 1:.1f}×".replace(".", ","), {"leverage": lev + 1}))
+    # stop × dźwignia nie może przekroczyć 50%
+    return [(k, lab, ch) for k, lab, ch in out
+            if p["stop_loss_pct"] * float(ch.get("leverage", p.get("leverage") or 1)
+                                         if ch.get("leverage_mode", mode) == "margin" else 1) <= 0.5]
+
+
+def default_variants(strategy, market, p, acc=None):
+    """[(key, label, kind, changes)] - mistrz + pretendenci z jedna zmiana.
+    Warianty dźwigni NIE trafiają tu automatycznie: wchodzą do laboratorium tylko z nauki na historii
+    (app/levstudy.py), gdy przejdą sprawdzian — żeby dźwignia nie wygrała dzięki kilku szczęśliwym tygodniom."""
     from .optimize import candidates
     out = [("champion", "Mistrz (obecne ustawienia bota)", "champion", {})]
+    if p.get("lab_scope") == "leverage":
+        return out
     uses = ml.uses_ml(strategy, p)
     if uses:
         conf = p.get("ml_confidence", "mid")
@@ -80,7 +174,8 @@ class Lab:
     def variants(self):
         rows = self.db.all("SELECT * FROM lab_variants WHERE bot_id=? AND status='active' ORDER BY id", (self.r.id,))
         if not rows:
-            for key, label, kind, changes in default_variants(self.r.bot["strategy"], self.r.market, self.r.p):
+            for key, label, kind, changes in default_variants(self.r.bot["strategy"], self.r.market, self.r.p,
+                                                              self.r.acc):
                 self.db.execute("INSERT INTO lab_variants(bot_id, key, label, kind, changes, created_at, status, state) "
                                 "VALUES (?,?,?,?,?,?, 'active', ?)",
                                 (self.r.id, key, label, kind, json.dumps(changes), now_iso(), json.dumps({})))
@@ -136,7 +231,7 @@ class Lab:
                         prob = pd.Series(np.nan, index=df.index)
                     d = ml.signal_frame(strat, df, vp, prob, cost)
                 else:
-                    d = strat.compute(df, vp)
+                    d = with_short(strat, df, vp)
                     if getattr(self.r, "copy_mode", False):
                         if self.r.ext_filter:
                             d = ext.apply_copy(d, self.r.ext_filter, sym, vp)
@@ -150,51 +245,104 @@ class Lab:
             if changed:
                 self.db.execute("UPDATE lab_variants SET state=? WHERE id=?", (json.dumps(st), v["id"]))
 
+    def _lev(self, vp, sym, side):
+        """Mnożnik ruchu ceny dla wyniku od własnego kapitału (None = tej pozycji nie da się otworzyć)."""
+        mode = vp.get("leverage_mode", "off")
+        if mode == "margin":
+            return lev_factor(vp)
+        if mode == "etf":
+            from . import levetf
+            pk = levetf.pick(sym, levetf.parse_custom(vp.get("etf_pairs")))
+            e = pk["bull"] if side > 0 else pk["bear"]
+            return abs(e[1]) if e else None
+        return 1.0
+
+    def _financing(self, vp, pos, days):
+        """Koszt pożyczki / ETF-u jako % własnego kapitału pozycji (przybliżenie jak w backteście)."""
+        mode, L = vp.get("leverage_mode", "off"), pos.get("lev", 1.0)
+        if mode == "etf":
+            return 0.0095 * days / 365 * 100
+        if mode != "margin":
+            return 0.0
+        if self.r.market == "crypto":
+            return L * (0.0002 + 0.0002 * days * 6) * 100
+        if pos.get("side", 1) < 0:
+            return L * 0.01 * days / 365 * 100
+        return (L - 1) * 0.07 * days / 365 * 100
+
     def _advance(self, v, vp, sym, rows, cost):
         st = v["state"]
         pos_all = st["pos"]
         trail = vp.get("trail_atr_mult") or 0
         be = vp.get("breakeven_after_pct") or 0
         hold = timedelta(days=vp["max_hold_days"]) if vp.get("max_hold_days") else None
-        allowed = self.r.regime[0]
+        regime_ok = self.r.regime[0]
+        direction = vp.get("direction", "long") if vp.get("leverage_mode", "off") != "off" else "long"
+        long_ok = regime_ok and direction in ("long", "both")
+        short_ok = (not regime_ok if vp.get("regime_filter") else True) and direction in ("short", "both")
         for ts, r in rows.iterrows():
             pos = pos_all.get(sym)
             if pos:
+                sd = pos.get("side", 1)
+                ext = pos.get("peak", pos["entry"])           # long: szczyt, short: dołek
                 stop, why = pos["sl"], "stop-loss"
                 if trail and pos.get("atr") == pos.get("atr") and pos.get("atr"):
-                    t = pos["peak"] - trail * pos["atr"]
-                    if t > stop:
+                    t = ext - sd * trail * pos["atr"]
+                    if sd * (t - stop) > 0:
                         stop, why = t, "stop kroczący"
-                if be and pos["peak"] >= pos["entry"] * (1 + be) and pos["entry"] * (1 + 2 * cost) > stop:
-                    stop, why = pos["entry"] * (1 + 2 * cost), "stop na wejściu"
+                be_px = pos["entry"] * (1 + sd * 2 * cost)
+                if be and sd * (ext / pos["entry"] - 1) >= be and sd * (be_px - stop) > 0:
+                    stop, why = be_px, "stop na wejściu"
                 out = None
-                if r["low"] <= stop:
+                if sd > 0 and r["low"] <= stop:
                     out = (min(r["open"], stop), why)
-                elif r["high"] >= pos["tp"]:
+                elif sd < 0 and r["high"] >= stop:
+                    out = (max(r["open"], stop), why)
+                elif sd > 0 and r["high"] >= pos["tp"]:
                     out = (max(r["open"], pos["tp"]), "take-profit")
-                elif r["exit"]:
+                elif sd < 0 and r["low"] <= pos["tp"]:
+                    out = (min(r["open"], pos["tp"]), "take-profit")
+                elif (r["exit"] if sd > 0 else r.get("sexit", False)):
                     out = (r["close"], "sygnał wyjścia")
                 elif hold and ts - pd.Timestamp(pos["t_in"]) >= hold:
                     out = (r["close"], "limit czasu")
                 if out:
-                    pnl = (out[0] / pos["entry"] - 1 - 2 * cost) * 100
+                    L = pos.get("lev", 1.0)
+                    days = max((ts - pd.Timestamp(pos["t_in"])).total_seconds() / 86400, 0)
+                    pnl = (sd * (out[0] / pos["entry"] - 1) * L - 2 * cost * (L if vp.get("leverage_mode") == "margin"
+                                                                               else 1)) * 100
+                    pnl -= self._financing(vp, pos, days)
+                    pnl = max(pnl, -100.0)
+                    reason = out[1] + (" (spadek)" if sd < 0 else "") + (f" ×{L:g}" if L != 1 else "")
                     self.db.execute("INSERT INTO lab_trades(variant_id, bot_id, symbol, t_in, t_out, entry, exit, pnl_pct, "
                                     "weight, reason) VALUES (?,?,?,?,?,?,?,?,?,?)",
                                     (v["id"], self.r.id, sym, pos["t_in"], ts.isoformat(), pos["entry"], out[0], pnl,
-                                     pos["w"], out[1]))
+                                     pos["w"], reason))
                     del pos_all[sym]
                     continue
-                pos["peak"] = max(pos["peak"], float(r["high"]))
+                pos["peak"] = max(ext, float(r["high"])) if sd > 0 else min(ext, float(r["low"]))
                 pos["atr"] = float(r["atr"]) if r["atr"] == r["atr"] else pos.get("atr")
                 continue
-            if allowed and r["entry"] and not r["exit"] and len(pos_all) < vp["max_positions"]:
-                price = float(r["close"])
-                prob = r.get("ml_prob")
-                prob = None if prob is None or pd.isna(prob) else float(prob)
-                w = 1.0 / vp["max_positions"] * (ml.size_scale(prob, vp, cost) if vp.get("ml_sizing") else 1.0)
-                pos_all[sym] = {"entry": price, "t_in": ts.isoformat(), "sl": price * (1 - vp["stop_loss_pct"]),
-                                "tp": price * (1 + vp["take_profit_pct"]), "peak": price, "w": w,
-                                "atr": float(r["atr"]) if r["atr"] == r["atr"] else None}
+            if len(pos_all) >= vp["max_positions"]:
+                continue
+            side = 0
+            if long_ok and r["entry"] and not r["exit"]:
+                side = 1
+            elif short_ok and r.get("sentry", False) and not r.get("sexit", False):
+                side = -1
+            if not side:
+                continue
+            L = self._lev(vp, sym, side)
+            if L is None:
+                continue
+            price = float(r["close"])
+            prob = r.get("ml_prob")
+            prob = None if prob is None or pd.isna(prob) else float(prob)
+            w = 1.0 / vp["max_positions"] * (ml.size_scale(prob, vp, cost) if vp.get("ml_sizing") else 1.0)
+            pos_all[sym] = {"entry": price, "t_in": ts.isoformat(), "side": side, "lev": L,
+                            "sl": price * (1 - side * vp["stop_loss_pct"]),
+                            "tp": price * (1 + side * vp["take_profit_pct"]), "peak": price, "w": w,
+                            "atr": float(r["atr"]) if r["atr"] == r["atr"] else None}
 
 
 # ------------------------------------------------------------------ wyniki i decyzje (watek menedzera)
@@ -244,15 +392,53 @@ def judge(db, bot, p):
             x["why"].append(f"{x['trades']}/{need_n} transakcji")
         if x["days"] < need_d:
             x["why"].append(f"{x['days']:.0f}/{need_d} dni")
-        if x["return_pct"] <= champ["return_pct"] + 1:
-            x["why"].append("nie lepszy od mistrza o >1 pp")
-        if x["max_dd_pct"] < champ["max_dd_pct"] * 1.25 - 0.5:
-            x["why"].append("większe obsunięcie")
+        if is_lev(x["changes"]):
+            x["why"] += lev_verdict(x["key"], champ["return_pct"], champ["max_dd_pct"], x["return_pct"],
+                                    x["max_dd_pct"], 25)
+        else:
+            if x["return_pct"] <= champ["return_pct"] + 1:
+                x["why"].append("nie lepszy od mistrza o >1 pp")
+            if x["max_dd_pct"] < champ["max_dd_pct"] * 1.25 - 0.5:
+                x["why"].append("większe obsunięcie")
         if not x["why"]:
             x["eligible"] = True
             if not best or x["return_pct"] > best["return_pct"]:
                 best = x
     return best, champ, items
+
+
+def add_variant(db, bot, acc, key, label, changes, note=None):
+    """Dopisuje pretendenta do laboratorium bota (np. wariant dźwigni sprawdzony na historii).
+    Gdy laboratorium nie ma jeszcze wariantów, najpierw zakłada standardowy zestaw."""
+    p = full_params(bot["market"], bot["strategy"], bot["params"])
+    have = db.all("SELECT key FROM lab_variants WHERE bot_id=? AND status='active'", (bot["id"],))
+    if not have:
+        for k, lab, kind, ch in default_variants(bot["strategy"], bot["market"], p, acc):
+            db.execute("INSERT INTO lab_variants(bot_id, key, label, kind, changes, created_at, status, state) "
+                       "VALUES (?,?,?,?,?,?, 'active', ?)", (bot["id"], k, lab, kind, json.dumps(ch), now_iso(), "{}"))
+        db.execute("INSERT INTO lab_events(bot_id, ts, kind, status, text) VALUES (?,?,?,?,?)",
+                   (bot["id"], now_iso(), "start", "info", "Start laboratorium: nowy zestaw wariantów."))
+    cur = db.one("SELECT id, changes FROM lab_variants WHERE bot_id=? AND status='active' AND key=?", (bot["id"], key))
+    if cur and json.loads(cur["changes"] or "{}") == changes:
+        return False                                  # już gra na żywo — nie zerujemy jego wyników
+    db.execute("UPDATE lab_variants SET status='retired' WHERE bot_id=? AND status='active' AND key=?", (bot["id"], key))
+    db.execute("INSERT INTO lab_variants(bot_id, key, label, kind, changes, created_at, status, state) "
+               "VALUES (?,?,?,?,?,?, 'active', ?)", (bot["id"], key, label, "params", json.dumps(changes), now_iso(), "{}"))
+    if note:
+        db.execute("INSERT INTO lab_events(bot_id, ts, kind, status, text) VALUES (?,?,?,?,?)",
+                   (bot["id"], now_iso(), "variant", "info", note))
+    return True
+
+
+def retire_variant(db, bot_id, key, note):
+    """Wycofuje aktywnego pretendenta (np. wariant dźwigni, który przestał przechodzić test na historii)."""
+    cur = db.one("SELECT id FROM lab_variants WHERE bot_id=? AND status='active' AND key=?", (bot_id, key))
+    if not cur:
+        return False
+    db.execute("UPDATE lab_variants SET status='retired' WHERE id=?", (cur["id"],))
+    db.execute("INSERT INTO lab_events(bot_id, ts, kind, status, text) VALUES (?,?,?,?,?)",
+               (bot_id, now_iso(), "variant", "info", note))
+    return True
 
 
 def apply_winner(db, manager, bot, winner, auto):

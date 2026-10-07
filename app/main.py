@@ -221,6 +221,8 @@ async def lifespan(app):
             webhook.start(db)
         except Exception as e:
             log.warning(f"Odbiornik alertów TradingView nie wystartował: {e}")
+        from . import levstudy
+        levstudy.start_loop(db, manager, provider_for, run_backtest, notify=lambda m: notify.send(m, "lab"))
         threading.Thread(target=startup_notice, daemon=True).start()
     if os.name == "nt" and not demo.on() and not INSTALLED:
         threading.Thread(target=windows_update_loop, daemon=True, name="windows-updater").start()
@@ -230,6 +232,9 @@ async def lifespan(app):
 
 
 app = FastAPI(title="TradingApp", lifespan=lifespan, docs_url=None, redoc_url=None)
+# kompresja: app.js ~260 KB -> ~60 KB; duza roznica przy wolnym laczu (np. Tailscale przez przekaznik DERP)
+from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 
 # wersja demo: to, czego nie wolno ruszac (klucze, bramka, powiadomienia, logowanie, aktualizacje)
@@ -250,7 +255,10 @@ async def auth(request: Request, call_next):
             return JSONResponse({"detail": "Zaloguj sie"}, status_code=401)
     response = await call_next(request)
     if path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-cache"      # zawsze sprawdz, czy plik sie nie zmienil
+        # plik z numerem wersji w adresie (?v=1.26.2) nie zmieni sie do nastepnej aktualizacji -> trzymaj w przegladarce;
+        # bez numeru: zawsze sprawdz, czy plik sie nie zmienil
+        response.headers["Cache-Control"] = ("public, max-age=31536000, immutable" if request.query_params.get("v")
+                                             else "no-cache")
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
@@ -1167,6 +1175,48 @@ def lab_decide(event_id: int, action: str):
     return {"ok": True, "text": text}
 
 
+class LevStudyIn(BaseModel):
+    bot_ids: list[int] = []
+    when: str = "now"          # now | night
+    weekly: bool = False
+
+
+@app.get("/api/lab/leverage-study")
+def lev_study_get():
+    from . import levstudy
+    d = levstudy.load()
+    cands = []
+    for b in db.bots():
+        ok, why = levstudy.eligible(b)
+        cands.append({"id": b["id"], "name": b["name"], "ok": ok, "why": why})
+    d["candidates"] = cands
+    d["plan"] = levstudy.plan_get()
+    return d
+
+
+@app.post("/api/lab/leverage-study")
+def lev_study_start(body: LevStudyIn):
+    from . import levstudy
+    if config.DEMO:
+        raise HTTPException(403, "W wersji demonstracyjnej nauka dźwigni jest wyłączona.")
+    if body.when == "night":
+        pl = levstudy.schedule(body.weekly, body.bot_ids)
+        log.info(f"Nauka dźwigni zaplanowana na {pl['next_at']}" + (" (co tydzień)" if body.weekly else ""))
+        return {"ok": True, "plan": pl}
+    try:
+        levstudy.start(db, manager, provider_for, run_backtest, body.bot_ids or None,
+                       notify=lambda m: notify.send(m, "lab"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+@app.delete("/api/lab/leverage-study/plan")
+def lev_study_unplan():
+    from . import levstudy
+    return {"ok": True, "plan": levstudy.unschedule()}
+
+
 @app.post("/api/lab/{bot_id}/reset")
 def lab_reset(bot_id: int):
     db.execute("UPDATE lab_variants SET status='retired' WHERE bot_id=? AND status='active'", (bot_id,))
@@ -1584,6 +1634,82 @@ def bot_tv_rotate(bot_id: int):
     db.update_bot(bot_id, params=p)
     db.log(bot_id, "INFO", "Nowy adres webhooka TradingView (stary przestał działać).")
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ zlecenia ręczne (kilka akcji / monet bez bota)
+class ManualIn(BaseModel):
+    account: str
+    symbol: str
+    side: str
+    qty: float | None = None
+    amount: float | None = None
+    password: str = ""
+    code: str = ""
+
+
+def _manual_acc(name):
+    acc = config.ACCOUNTS.get(name)
+    if not acc:
+        raise HTTPException(400, f"Konto '{name}' nie istnieje.")
+    return acc
+
+
+@app.get("/api/manual/quote")
+def manual_quote(account: str, symbol: str):
+    from . import manual
+    try:
+        return manual.quote(db, _manual_acc(account), symbol)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/manual/order")
+def manual_order(body: ManualIn, request: Request):
+    from . import manual, risk
+    acc = _manual_acc(body.account)
+    if risk.is_real(acc):                       # prawdziwe pieniądze: hasło (i 2FA) przy każdym zleceniu
+        _confirm_password(request, body.password)
+        _confirm_code(request, body.code)
+    try:
+        r = manual.place(db, acc, body.symbol, body.side, body.qty, body.amount,
+                         notify=lambda m: notify.send(m, "system"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    log.info(r["text"])
+    return r
+
+
+@app.get("/api/accounts/{name}/holdings")
+def account_holdings(name: str):
+    """Co jest na koncie (tylko odczyt): gotówka i pozycje z wyceną; przy każdej — który bot ją prowadzi."""
+    from . import risk
+    acc = _manual_acc(name)
+    try:
+        b = get_broker(acc)
+        a = b.account()
+        pos = b.positions()
+    except Exception as e:
+        raise HTTPException(400, f"Nie udało się odczytać konta: {e}")
+    owner = {}
+    for bot in db.bots():
+        if bot["account"] == name:
+            for s in db.pos_states(bot["id"]):
+                owner[s] = bot["name"]
+    rows = []
+    for k, v in pos.items():
+        rows.append({"symbol": v["symbol"], "qty": v["qty"], "price": v.get("price"), "avg_entry": v.get("avg_entry"),
+                     "value": v.get("market_value"), "unrealized": v.get("unrealized"), "bot": owner.get(k)})
+    rows.sort(key=lambda r: -(r["value"] or 0))
+    return {"account": name, "currency": a.get("currency") or acc.extra.get("quote", "USD"), "equity": a["equity"],
+            "cash": a["cash"], "positions": rows, "real": risk.is_real(acc)}
+
+
+@app.get("/api/manual/orders")
+def manual_orders(limit: int = 50):
+    from . import manual
+    return manual.history(db, max(1, min(limit, 500)))
 
 
 # ------------------------------------------------------------------ strategia z opisu słownego (AI) i galeria
